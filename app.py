@@ -67,11 +67,43 @@ if "f_loc" not in st.session_state:
         "f_loc": "病房", "f_name": "", "f_age": "", "f_gen": "",
         "f_med": "", "f_hist": "", "f_time": now_tw.time(),
         "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": "",
-        "add_error": False
+        "f_special": False, "add_error": False
     })
 
-# --- 年齡選單 (預設空白，往下50~120，往上49~1) ---
-age_options = [""] + [str(i) for i in range(50, 120)] + [str(i) for i in range(49, 0, -1)]
+# --- 年齡選單 (往上 49~1，往下 50~110) ---
+age_options = [str(i) for i in range(1, 50)] + [""] + [str(i) for i in range(50, 111)]
+default_age_idx = age_options.index("")
+
+# --- 全新智慧排序邏輯 (優先級距 + 時間跨度) ---
+def get_sort_key(h):
+    loc = h.get('location', '')
+    is_special = h.get('is_special', False)
+
+    # 1. 單位與特別交班排序優先度
+    if loc == "急診" and is_special: p_loc = 1
+    elif loc == "急診" and not is_special: p_loc = 2
+    elif is_special: p_loc = 3 # 其他單位的特別交班
+    elif loc == "病房": p_loc = 4
+    elif loc == "二樓病房": p_loc = 5
+    elif loc == "三樓病房": p_loc = 6
+    elif loc == "四樓病房": p_loc = 7
+    elif loc == "五樓病房": p_loc = 8
+    else: p_loc = 9
+
+    # 2. 時間區塊排序 (08:00~23:59 優先，00:00~07:59 在後)
+    t_str = h.get('time_occurred', '00:00')
+    try:
+        hrs, mins = map(int, t_str.split(':'))
+        total_mins = hrs * 60 + mins
+    except:
+        total_mins = 0
+
+    if 480 <= total_mins <= 1439: # 08:00 - 23:59
+        p_time_block = 1
+    else:                         # 00:00 - 07:59
+        p_time_block = 2
+
+    return (p_loc, p_time_block, total_mins)
 
 # ================= Callback 函數區 =================
 def clear_form():
@@ -86,6 +118,7 @@ def clear_form():
     st.session_state.f_diag_c = ""
     st.session_state.f_diag_m = ""
     st.session_state.f_content = ""
+    st.session_state.f_special = False
     st.session_state.add_error = False
 
 def load_form(h):
@@ -108,13 +141,13 @@ def load_form(h):
         st.session_state.f_diag_c = "其他 (請於下方輸入)"
         st.session_state.f_diag_m = diag
     st.session_state.f_content = h.get("content", "")
+    st.session_state.f_special = h.get("is_special", False)
 
 def cb_refresh():
     st.session_state.handovers = []
     save_handovers([])
     clear_form()
     st.session_state.uploader_key += 1
-    # 刷新時重置日期與醫師
     st.session_state.f_duty_date = datetime.datetime.now(tw_tz).date()
     st.session_state.f_duty_doc = ""
 
@@ -130,7 +163,8 @@ def cb_add():
             "med_record": st.session_state.f_med, "attending_doc": st.session_state.f_doc,
             "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
             "diagnosis": diag_final, "history": st.session_state.f_hist,
-            "is_er": (st.session_state.f_loc == "急診") 
+            "is_er": (st.session_state.f_loc == "急診"),
+            "is_special": st.session_state.f_special
         })
         save_handovers(st.session_state.handovers)
         clear_form()
@@ -200,7 +234,7 @@ c1, c2 = st.columns(2)
 with c1:
     st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"], key="f_loc")
     st.text_input("病人姓名 (必填)", key="f_name")
-    st.selectbox("年紀", age_options, key="f_age")
+    st.selectbox("年紀", age_options, index=default_age_idx, key="f_age")
     st.selectbox("性別", ["", "男", "女"], key="f_gen")
     st.text_input("病歷號", key="f_med")
     st.text_area("內外科病史輸入", height=60, key="f_hist")
@@ -210,6 +244,8 @@ with c2:
     st.selectbox("主治醫師", ATTENDING_DOCS, key="f_doc")
     st.selectbox("診斷快速選項", DIAG_CHOICES, key="f_diag_c")
     st.text_input("手動輸入診斷 (若選其他)", key="f_diag_m")
+    # 新增特別交班勾選框
+    st.checkbox("🚨 特別交班", key="f_special")
     
 st.text_area("交班內容 (必填)", key="f_content")
 
@@ -225,18 +261,19 @@ with btn_col2:
 # ================= 區塊 3：已登錄交班預覽 =================
 st.header("3. 已登錄交班事項")
 if st.session_state.handovers:
-    sorted_view = sorted(st.session_state.handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
+    # 應用全新的 get_sort_key 進行排序
+    sorted_view = sorted(st.session_state.handovers, key=get_sort_key)
     for h in sorted_view:
         idx = st.session_state.handovers.index(h)
         h_age_disp = h['age'] if h.get('age') else "?"
         h_gen_disp = f"{h['gender']}性" if h.get('gender') else ""
+        sp_tag = " [🚨特別交班]" if h.get('is_special') else ""
         
-        with st.expander(f"[{h['location']}] {h['name']} ({h_age_disp}歲{h_gen_disp}) - {h['time_occurred']}"):
+        with st.expander(f"[{h['location']}] {h['name']} ({h_age_disp}歲{h_gen_disp}) - {h['time_occurred']}{sp_tag}"):
             h_diag_disp = h['diagnosis'] if h.get('diagnosis') else "??"
             st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h_diag_disp}")
             st.write(f"內容：{h['content']}")
             
-            # 讓按鈕靠左緊密排列
             c_edit, c_del, c_empty = st.columns([1.5, 1.5, 7])
             with c_edit:
                 st.button(f"✏️ 修改 {h['name']}", key=f"edit_{idx}", on_click=cb_edit, args=(idx, h))
@@ -250,14 +287,15 @@ def get_unique_cells(row):
         if cell not in unique_cells: unique_cells.append(cell)
     return unique_cells
 
-def safe_fill_cell(cell, text, font_size=12):
+# 修改：加入 align 參數，預設靠左
+def safe_fill_cell(cell, text, font_size=12, align=WD_ALIGN_PARAGRAPH.LEFT):
     if text is None: text = ""
     for p in cell.paragraphs: p.text = "" 
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     run = p.add_run(str(text).strip())
     run.font.size = Pt(font_size)
     run.bold = False
-    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    p.alignment = align
     p.paragraph_format.left_indent = Pt(0)
     p.paragraph_format.first_line_indent = Pt(0)
     p.paragraph_format.space_before = Pt(0)
@@ -295,7 +333,8 @@ def visual_smart_chunker(text, max_visual_width=78):
 st.header("4. 預覽與輸出")
 
 preview_lines = []
-sorted_h = sorted(st.session_state.handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
+# 預覽字串同樣套用全新排序
+sorted_h = sorted(st.session_state.handovers, key=get_sort_key)
 
 for h in sorted_h:
     h_loc = h.get('location', '病房')
@@ -345,7 +384,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
     if not os.path.exists(TEMPLATE_PATH): raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。")
     doc = Document(TEMPLATE_PATH)
     
-    # 填寫日期與置中簽名
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
@@ -362,7 +400,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                 rFonts = rPr.get_or_add_rFonts()
                 rFonts.set(qn('w:eastAsia'), '標楷體')
     
-    # HIS 護理站填寫
+    # HIS 護理站填寫 (強制置中對齊 WD_ALIGN_PARAGRAPH.CENTER)
     for table in doc.tables:
         for row in table.rows:
             u_cells = get_unique_cells(row)
@@ -375,11 +413,11 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                     clean_cell = re.sub(r'[\r\n\t]', '', c.text.replace(" ", "").replace("　", ""))
                     if matched_st in clean_cell:
                         if idx+3 < len(u_cells):
-                            safe_fill_cell(u_cells[idx+1], p_stations[matched_st][0], font_size=10)
-                            safe_fill_cell(u_cells[idx+2], p_stations[matched_st][1], font_size=10)
-                            safe_fill_cell(u_cells[idx+3], p_stations[matched_st][2], font_size=10)
+                            # 套用置中對齊
+                            safe_fill_cell(u_cells[idx+1], p_stations[matched_st][0], font_size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
+                            safe_fill_cell(u_cells[idx+2], p_stations[matched_st][1], font_size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
+                            safe_fill_cell(u_cells[idx+3], p_stations[matched_st][2], font_size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
 
-    # 動態增刪新住院/出院病人 (徹底解決表格溢出覆蓋危險評估 Bug)
     for table in doc.tables:
         blank_new_rows = []
         blank_out_rows = []
@@ -409,7 +447,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                     c_name = re.sub(r'[\r\n\t\s_0]', '', u_cells[name_col_out].text)
                     if c_name == "": blank_out_rows.append((row, name_col_out))
 
-        # 自動擴展空白列 (不夠就複製插入)
         while len(p_new) > len(blank_new_rows) and blank_new_rows:
             last_row, col = blank_new_rows[-1]
             new_tr = deepcopy(last_row._tr)
@@ -422,7 +459,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
             last_row._tr.addnext(new_tr)
             blank_out_rows.append((_Row(new_tr, last_row._parent), col))
 
-        # 填寫新住院病人並刪除多餘空白列
         for i, (row, col_idx) in enumerate(blank_new_rows):
             u_cells = get_unique_cells(row)
             if i < len(p_new):
@@ -435,7 +471,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                 try: row._element.getparent().remove(row._element)
                 except: pass
                 
-        # 填寫出院病人並刪除多餘空白列
         for i, (row, col_idx) in enumerate(blank_out_rows):
             u_cells = get_unique_cells(row)
             if i < len(p_out):
@@ -448,7 +483,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                 try: row._element.getparent().remove(row._element)
                 except: pass
 
-    # 危險評估瘦身
     for table in doc.tables:
         header_row_idx = -1
         for i, row in enumerate(table.rows):
@@ -462,7 +496,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                 row_to_del._element.getparent().remove(row_to_del._element)
             break
 
-    # 交班內容填寫
     all_chunks_to_fill = []
     for i, line in enumerate(preview_lines):
         chunks = visual_smart_chunker(line, max_visual_width=78)
@@ -517,7 +550,7 @@ if st.button("🚀 生成下載 Word", type="primary"):
             st.session_state.f_duty_date, 
             st.session_state.f_duty_doc
         )
-        st.success("✅ 檔案已更新並備妥！(表格溢出 Bug 已徹底修復，支援無限動態擴增！)")
+        st.success("✅ 檔案已更新並備妥！")
         st.download_button("📥 點擊下載", f, f"值班日誌_{st.session_state.f_duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
