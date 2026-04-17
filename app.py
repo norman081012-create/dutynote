@@ -27,7 +27,7 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (終極無痕對位版)")
+st.title("🏥 醫師病房值班日誌自動生成器 (段落精準無痕版)")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -107,17 +107,19 @@ def process_data(raw_text, handovers, selected_date):
     
     doc = Document(TEMPLATE_PATH)
     
-    # --- 0. 填寫日期 ---
+    # --- 0. 日期無痕替換 (精準鎖定段落，絕不誤刪護理站) ---
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     
-    # 掃描段落與表格找日期
     for p in doc.paragraphs:
-        if "日期" in p.text.replace(" ", ""): p.text = date_str
+        if "日期：" in p.text.replace(" ", "") or "日期:" in p.text: 
+            p.text = date_str
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                if "日期：" in cell.text.replace(" ", ""): cell.text = date_str
+                for p in cell.paragraphs:
+                    if "日期：" in p.text.replace(" ", "") or "日期:" in p.text:
+                        p.text = date_str
 
     # --- 1. 文字解析引擎 (從貼上的文字萃取資料) ---
     parsed_stations = {}
@@ -131,31 +133,30 @@ def process_data(raw_text, handovers, selected_date):
             line = line.strip()
             if not line: continue
             
-            # 切割資料 (支援 Tab 或多重空白)
+            # 切割資料
             parts = [p.strip() for p in line.split('\t')]
             if len(parts) < 2:
                 parts = [p.strip() for p in re.split(r'\s{2,}', line)]
             
-            # 狀態判斷
             row_str = "".join(parts).replace(" ", "")
-            if "護理站" in row_str and "病人總數" in row_str: current_section = "station"
-            elif "新入院" in row_str or "新住院" in row_str: current_section = "new"
-            elif "出院病人" in row_str: current_section = "out"
+            # 更強大的表頭容錯抓取
+            if "護理站" in row_str or "急診護理站" in row_str: current_section = "station"
+            if "新入院" in row_str or "新住院" in row_str: current_section = "new"
+            if "出院病人" in row_str: current_section = "out"
             
-            # 裝載資料
             if current_section == "station":
                 st_name = parts[0].replace(" ", "")
                 if st_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
                     if len(parts) >= 4:
                         parsed_stations[st_name] = parts[1:4] 
             elif current_section == "new":
-                if "姓名" in parts[0] or "病患" in parts[0]: continue
+                if "姓名" in parts[0] or "病患" in parts[0] or "新住院" in parts[0]: continue
                 if len(parts) >= 5: parsed_new.append(parts)
             elif current_section == "out":
-                if "姓名" in parts[0] or "病患" in parts[0]: continue
+                if "姓名" in parts[0] or "病患" in parts[0] or "出院" in parts[0]: continue
                 if len(parts) >= 5: parsed_out.append(parts)
 
-    # --- 2. Word 無痕對號入座引擎 (絕對不增刪行) ---
+    # --- 2. Word 無痕對號入座引擎 (只寫入空白段落，絕對保留格式) ---
     new_idx = 0
     out_idx = 0
     
@@ -165,17 +166,16 @@ def process_data(raw_text, handovers, selected_date):
             cells = row.cells
             if not cells: continue
             
-            # 徹底清洗 Word 儲存格裡的隱藏空白與亂碼 (\xa0 是全形空白的一種)
             c0_text = cells[0].text.replace(" ", "").replace("　", "").replace("\xa0", "").strip()
             row_text_concat = "".join([c.text for c in cells]).replace(" ", "").replace("　", "").replace("\xa0", "")
             
-            # A. 護理站人數對位填入
+            # A. 護理站人數對位填入 (用 paragraphs[0] 保留字體設定)
             if c0_text in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
                 if c0_text in parsed_stations and len(cells) >= 4:
                     nums = parsed_stations[c0_text]
-                    cells[1].text = str(nums[0]) # 男
-                    cells[2].text = str(nums[1]) # 女
-                    cells[3].text = str(nums[2]) # 總人數
+                    if cells[1].paragraphs: cells[1].paragraphs[0].text = str(nums[0])
+                    if cells[2].paragraphs: cells[2].paragraphs[0].text = str(nums[1])
+                    if cells[3].paragraphs: cells[3].paragraphs[0].text = str(nums[2])
                 continue
             
             # B. 判斷是否為病人表頭
@@ -184,43 +184,41 @@ def process_data(raw_text, handovers, selected_date):
                     fill_mode = "new"
                 elif "動態" in row_text_concat or "出院" in row_text_concat:
                     fill_mode = "out"
-                continue # 標題列跳過
+                continue
             
             # C. 遇到其他無關段落，關閉填寫模式
             if fill_mode and ("出院病人" in c0_text or "危險評估" in c0_text or "病房特殊" in c0_text or "討論與" in c0_text):
                 fill_mode = None
             
-            # D. 在預留的空格中填入病人資料
-            # 判斷這格是不是空的 (沒有字、只有底線，或是被我們清洗後變空字串)
             is_empty_cell = (c0_text == "" or c0_text == "_" or c0_text == "0")
             
+            # D. 填入新病人 (精準抓取張Ｏ月娥等資料)
             if fill_mode == "new" and is_empty_cell:
                 if new_idx < len(parsed_new):
                     p_data = parsed_new[new_idx]
-                    cells[0].text = p_data[0] # 姓名
-                    if len(cells) > 1 and len(p_data) > 1: cells[1].text = p_data[1]
-                    if len(cells) > 2 and len(p_data) > 2: cells[2].text = p_data[2]
-                    if len(cells) > 3 and len(p_data) > 3: cells[3].text = p_data[3]
-                    if len(cells) > 4 and len(p_data) > 4: cells[4].text = p_data[4]
-                    if len(cells) > 5 and len(p_data) > 5: cells[5].text = p_data[5]
-                    # col 6 在樣板是 危險評估，col 7 是 燈號
-                    if len(cells) > 7 and len(p_data) > 6: cells[7].text = p_data[6] 
+                    if cells[0].paragraphs: cells[0].paragraphs[0].text = p_data[0] # 姓名
+                    if len(cells) > 1 and len(p_data) > 1 and cells[1].paragraphs: cells[1].paragraphs[0].text = p_data[1]
+                    if len(cells) > 2 and len(p_data) > 2 and cells[2].paragraphs: cells[2].paragraphs[0].text = p_data[2]
+                    if len(cells) > 3 and len(p_data) > 3 and cells[3].paragraphs: cells[3].paragraphs[0].text = p_data[3]
+                    if len(cells) > 4 and len(p_data) > 4 and cells[4].paragraphs: cells[4].paragraphs[0].text = p_data[4]
+                    if len(cells) > 5 and len(p_data) > 5 and cells[5].paragraphs: cells[5].paragraphs[0].text = p_data[5]
+                    if len(cells) > 7 and len(p_data) > 6 and cells[7].paragraphs: cells[7].paragraphs[0].text = p_data[6]
                     new_idx += 1
             
+            # E. 填入出院病人
             elif fill_mode == "out" and is_empty_cell:
                 if out_idx < len(parsed_out):
                     p_data = parsed_out[out_idx]
-                    cells[0].text = p_data[0]
-                    if len(cells) > 1 and len(p_data) > 1: cells[1].text = p_data[1]
-                    if len(cells) > 2 and len(p_data) > 2: cells[2].text = p_data[2]
-                    if len(cells) > 3 and len(p_data) > 3: cells[3].text = p_data[3]
-                    if len(cells) > 4 and len(p_data) > 4: cells[4].text = p_data[4]
-                    if len(cells) > 5 and len(p_data) > 5: cells[5].text = p_data[5]
-                    # col 6 在樣板是 出院動態
-                    if len(cells) > 6 and len(p_data) > 6: cells[6].text = p_data[6]
+                    if cells[0].paragraphs: cells[0].paragraphs[0].text = p_data[0]
+                    if len(cells) > 1 and len(p_data) > 1 and cells[1].paragraphs: cells[1].paragraphs[0].text = p_data[1]
+                    if len(cells) > 2 and len(p_data) > 2 and cells[2].paragraphs: cells[2].paragraphs[0].text = p_data[2]
+                    if len(cells) > 3 and len(p_data) > 3 and cells[3].paragraphs: cells[3].paragraphs[0].text = p_data[3]
+                    if len(cells) > 4 and len(p_data) > 4 and cells[4].paragraphs: cells[4].paragraphs[0].text = p_data[4]
+                    if len(cells) > 5 and len(p_data) > 5 and cells[5].paragraphs: cells[5].paragraphs[0].text = p_data[5]
+                    if len(cells) > 6 and len(p_data) > 6 and cells[6].paragraphs: cells[6].paragraphs[0].text = p_data[6]
                     out_idx += 1
 
-    # --- 3. 填寫交班事項 (直接貼在標題下方) ---
+    # --- 3. 填寫交班事項 (不破壞儲存格，只在段落內追加) ---
     sorted_handovers = sorted(handovers, key=lambda x: (not x['is_er'], x['time_occurred']))
     h_text = ""
     for h in sorted_handovers:
@@ -228,19 +226,18 @@ def process_data(raw_text, handovers, selected_date):
         h_text += f"交班：{h['content']}\n"
 
     inserted = False
-    # 在表格內尋找「病房特殊狀況及處理：」
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
-                if "病房特殊狀況及處理" in cell.text.replace(" ", ""):
-                    # 直接在該儲存格內部換行並加上交班內容，保證格式不動
-                    cell.text += "\n" + h_text 
-                    inserted = True
-                    break
+                for p in cell.paragraphs:
+                    if "病房特殊狀況及處理" in p.text.replace(" ", ""):
+                        p.add_run("\n" + h_text)
+                        inserted = True
+                        break
+                if inserted: break
             if inserted: break
         if inserted: break
         
-    # 如果它不是表格，而是普通段落
     if not inserted:
         for p in doc.paragraphs:
             if "病房特殊狀況及處理" in p.text.replace(" ", ""):
