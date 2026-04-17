@@ -19,7 +19,6 @@ st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 TEMPLATE_PATH = "template.docx"
 DB_FILE = "handovers.json"
 
-# 【修改點 3】名單最下方新增 唐銘駿、吳騂、張維紘
 ATTENDING_DOCS = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
 DIAG_CHOICES = ["", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
 
@@ -39,6 +38,43 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
+# --- 表單狀態初始化 (解決時間跳動與保留暫存的問題) ---
+now_tw = datetime.datetime.now(tw_tz)
+if "f_loc" not in st.session_state:
+    st.session_state.update({
+        "f_loc": "病房", "f_name": "", "f_age": "50", "f_gen": "",
+        "f_med": "", "f_hist": "", "f_time": now_tw.time(),
+        "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": ""
+    })
+
+def clear_form():
+    st.session_state.update({
+        "f_loc": "病房", "f_name": "", "f_age": "50", "f_gen": "",
+        "f_med": "", "f_hist": "", "f_time": datetime.datetime.now(tw_tz).time(),
+        "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": ""
+    })
+
+def load_form(h):
+    st.session_state.f_loc = h.get("location", "病房")
+    st.session_state.f_name = h.get("name", "")
+    st.session_state.f_age = h.get("age", "50")
+    st.session_state.f_gen = h.get("gender", "")
+    st.session_state.f_med = h.get("med_record", "")
+    st.session_state.f_hist = h.get("history", "")
+    try:
+        st.session_state.f_time = datetime.datetime.strptime(h.get("time_occurred", "00:00"), "%H:%M").time()
+    except:
+        st.session_state.f_time = now_tw.time()
+    st.session_state.f_doc = h.get("attending_doc", "")
+    diag = h.get("diagnosis", "")
+    if diag in DIAG_CHOICES:
+        st.session_state.f_diag_c = diag
+        st.session_state.f_diag_m = ""
+    else:
+        st.session_state.f_diag_c = "其他 (請於下方輸入)"
+        st.session_state.f_diag_m = diag
+    st.session_state.f_content = h.get("content", "")
+
 st.title("🏥 醫師病房值班日誌自動生成器")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
@@ -47,18 +83,15 @@ with col_btn:
     if st.button("🔄 刷新並清空所有資料", type="secondary", use_container_width=True):
         st.session_state.handovers = []
         save_handovers([])
+        clear_form()
         st.session_state.uploader_key += 1
         st.rerun()
 
 st.header("1. 貼上 HIS 系統匯出資料")
 col_date, col_text = st.columns([2, 8])
 
-# 取得台灣當下時間
-now_tw = datetime.datetime.now(tw_tz)
-
 with col_date:
     duty_date = st.date_input("📅 選擇值班日期", now_tw.date())
-    # 【修改點 3】在日期下方新增選擇值班醫師
     duty_doc = st.selectbox("👨‍⚕️ 選擇值班醫師", ATTENDING_DOCS)
 
 def parse_his_data(raw_text):
@@ -96,38 +129,49 @@ with col_text:
 
 # ================= 區塊 2：交班事項登錄表單 =================
 st.header("2. 交班事項登錄")
-with st.form("handover_form", clear_on_submit=True):
-    c1, c2 = st.columns(2)
-    with c1:
-        location = st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"])
-        name = st.text_input("病人姓名 (必填)")
-        age = st.text_input("年紀")
-        gender = st.selectbox("性別", ["", "男", "女"])
-        med_record = st.text_input("病歷號")
-        history_input = st.text_area("內外科病史輸入", height=60)
-        
-    with c2:
-        time_occurred = st.time_input("狀況發生時間", value=now_tw.time())
-        attending_doc = st.selectbox("主治醫師", ATTENDING_DOCS)
-        diag_choice = st.selectbox("診斷快速選項", DIAG_CHOICES)
-        diag_manual = st.text_input("手動輸入診斷 (若選其他)")
-        
-    content = st.text_area("交班內容 (必填)")
+
+c1, c2 = st.columns(2)
+with c1:
+    st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"], key="f_loc")
+    st.text_input("病人姓名 (必填)", key="f_name")
+    age_options = [""] + [str(i) for i in range(1, 120)]
+    st.selectbox("年紀", age_options, key="f_age")
+    st.selectbox("性別", ["", "男", "女"], key="f_gen")
+    st.text_input("病歷號", key="f_med")
+    st.text_area("內外科病史輸入", height=60, key="f_hist")
     
-    if st.form_submit_button("確認新增交班"):
-        if not name or not content:
+with c2:
+    st.time_input("狀況發生時間", key="f_time")
+    st.selectbox("主治醫師", ATTENDING_DOCS, key="f_doc")
+    st.selectbox("診斷快速選項", DIAG_CHOICES, key="f_diag_c")
+    st.text_input("手動輸入診斷 (若選其他)", key="f_diag_m")
+    
+st.text_area("交班內容 (必填)", key="f_content")
+
+# 按鈕區塊
+btn_col1, btn_col2, btn_col3 = st.columns([2, 1, 1])
+with btn_col1:
+    if st.button("✅ 確認新增交班", type="primary", use_container_width=True):
+        if not st.session_state.f_name or not st.session_state.f_content:
             st.error("「姓名」與「內容」為必填！")
         else:
-            diag_final = diag_manual if not diag_choice or diag_choice == "其他 (請於下方輸入)" else diag_choice
+            diag_final = st.session_state.f_diag_m if not st.session_state.f_diag_c or st.session_state.f_diag_c == "其他 (請於下方輸入)" else st.session_state.f_diag_c
             st.session_state.handovers.append({
-                "location": location, "name": name, "age": age, "gender": gender,
-                "med_record": med_record, "attending_doc": attending_doc,
-                "time_occurred": time_occurred.strftime("%H:%M"), "content": content,
-                "diagnosis": diag_final, "history": history_input,
-                "is_er": (location == "急診") 
+                "location": st.session_state.f_loc, "name": st.session_state.f_name, 
+                "age": st.session_state.f_age, "gender": st.session_state.f_gen,
+                "med_record": st.session_state.f_med, "attending_doc": st.session_state.f_doc,
+                "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
+                "diagnosis": diag_final, "history": st.session_state.f_hist,
+                "is_er": (st.session_state.f_loc == "急診") 
             })
             save_handovers(st.session_state.handovers)
+            clear_form()
             st.rerun()
+
+with btn_col2:
+    if st.button("🔄 重新輸入", use_container_width=True):
+        clear_form()
+        st.rerun()
 
 # ================= 區塊 3：已登錄交班預覽 =================
 st.header("3. 已登錄交班事項")
@@ -139,12 +183,22 @@ if st.session_state.handovers:
         h_gen_disp = f"{h['gender']}性" if h.get('gender') else ""
         
         with st.expander(f"[{h['location']}] {h['name']} ({h_age_disp}歲{h_gen_disp}) - {h['time_occurred']}"):
-            st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h['diagnosis']}")
+            h_diag_disp = h['diagnosis'] if h.get('diagnosis') else "??"
+            st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h_diag_disp}")
             st.write(f"內容：{h['content']}")
-            if st.button(f"刪除 {h['name']}", key=f"del_{idx}"):
-                st.session_state.handovers.pop(idx)
-                save_handovers(st.session_state.handovers)
-                st.rerun()
+            
+            c_edit, c_del = st.columns([1, 1])
+            with c_edit:
+                if st.button(f"✏️ 修改 {h['name']}", key=f"edit_{idx}"):
+                    load_form(h)
+                    st.session_state.handovers.pop(idx) # 載回輸入區並從暫存移除
+                    save_handovers(st.session_state.handovers)
+                    st.rerun()
+            with c_del:
+                if st.button(f"🗑️ 刪除 {h['name']}", key=f"del_{idx}"):
+                    st.session_state.handovers.pop(idx)
+                    save_handovers(st.session_state.handovers)
+                    st.rerun()
 
 # ================= 核心工具函數 =================
 def get_unique_cells(row):
@@ -197,7 +251,7 @@ def visual_smart_chunker(text, max_visual_width=78):
 # ================= 區塊 4：預覽與輸出 =================
 st.header("4. 預覽與輸出")
 
-# --- 1. 產生預覽文字 (供畫面顯示) ---
+# --- 1. 產生預覽文字 ---
 preview_lines = []
 sorted_h = sorted(st.session_state.handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
 
@@ -221,13 +275,13 @@ for h in sorted_h:
     pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
     
     ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
-    
     doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else ""
-    
     his_part = f"內外科病史:{h_his}" if h_his else ""
-    diag_part = f"診斷:{h_diag}" if h_diag else ""
     
-    # 【修改點 2】改為「約XXX時」
+    # 針對診斷未填寫防呆
+    if not h_diag: h_diag = "??"
+    diag_part = f"診斷:{h_diag}"
+    
     time_part = f"約{h_time}時" if h_time else ""
     
     diag_time = ""
@@ -240,10 +294,8 @@ for h in sorted_h:
     full_line = "，".join(components)
     preview_lines.append(full_line)
 
-# 顯示網頁預覽區
 if preview_lines:
     with st.expander("👀 點擊展開：最終交班文字預覽 (與 Word 輸出內容相同)", expanded=True):
-        # 【修改點 1】已刪除 PDF 轉換提示
         preview_text = "\n\n".join(preview_lines) 
         st.text_area("即將寫入 Word 的文字：", value=preview_text, height=250, disabled=True)
 
@@ -252,17 +304,16 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
     if not os.path.exists(TEMPLATE_PATH): raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。")
     doc = Document(TEMPLATE_PATH)
     
-    # 填寫日期 (與值班醫師)
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
         if "日期" in p.text.replace(" ", ""): p.text = date_str
-        # 預留：若您的 Word 模板中有「值班醫師：」的欄位，會自動填入
         if "值班醫師" in p.text.replace(" ", "") and selected_doc: 
             p.text = f"值班醫師： {selected_doc}"
     
-    # HIS表格填寫
     new_idx, out_idx = 0, 0
+    rows_to_delete = [] # 用來收集多餘的空白出入院病人列
+    
     for table in doc.tables:
         fill_mode, name_col_idx = None, 0
         for row in table.rows:
@@ -290,19 +341,31 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
 
             if fill_mode and name_col_idx < len(u_cells):
                 c_name = re.sub(r'[\r\n\t\s_0]', '', u_cells[name_col_idx].text)
-                if c_name == "":
-                    if fill_mode == "new" and new_idx < len(p_new):
-                        pd = p_new[new_idx]
-                        for k in range(min(len(pd), len(u_cells))):
-                            safe_fill_cell(u_cells[name_col_idx+k if k<6 else name_col_idx+k+1], pd[k], font_size=10)
-                        new_idx += 1
-                    elif fill_mode == "out" and out_idx < len(p_out):
-                        pd = p_out[out_idx]
-                        for k in range(min(len(pd), len(u_cells))):
-                            safe_fill_cell(u_cells[name_col_idx+k], pd[k], font_size=10)
-                        out_idx += 1
+                if c_name == "": # 空白資料列
+                    if fill_mode == "new":
+                        if new_idx < len(p_new):
+                            pd = p_new[new_idx]
+                            for k in range(min(len(pd), len(u_cells))):
+                                safe_fill_cell(u_cells[name_col_idx+k if k<6 else name_col_idx+k+1], pd[k], font_size=10)
+                            new_idx += 1
+                        else:
+                            rows_to_delete.append(row) # 該列沒用到，排程刪除
+                    elif fill_mode == "out":
+                        if out_idx < len(p_out):
+                            pd = p_out[out_idx]
+                            for k in range(min(len(pd), len(u_cells))):
+                                safe_fill_cell(u_cells[name_col_idx+k], pd[k], font_size=10)
+                            out_idx += 1
+                        else:
+                            rows_to_delete.append(row) # 該列沒用到，排程刪除
 
-    # 危險評估瘦身：保留 4 列
+    # 執行刪除多餘的出入院空白列 (瘦身)
+    for r in rows_to_delete:
+        try:
+            r._element.getparent().remove(r._element)
+        except Exception:
+            pass
+
     for table in doc.tables:
         header_row_idx = -1
         for i, row in enumerate(table.rows):
@@ -316,7 +379,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                 row_to_del._element.getparent().remove(row_to_del._element)
             break
 
-    # 交班字串組裝與斷行
     all_chunks_to_fill = []
     for i, line in enumerate(preview_lines):
         chunks = visual_smart_chunker(line, max_visual_width=78)
@@ -324,7 +386,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
         if i < len(preview_lines) - 1:
             all_chunks_to_fill.append("")
 
-    # 逐列填入表格
     target_table = None
     start_row_idx = -1
     discuss_row_idx = -1
@@ -367,7 +428,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
         f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date, duty_doc)
-        st.success("✅ 檔案已更新並備妥！")
+        st.success("✅ 檔案已更新並備妥！(已自動移除多餘的出入院空白列)")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
