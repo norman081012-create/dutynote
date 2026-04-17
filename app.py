@@ -5,43 +5,37 @@ import io
 import json
 import os
 import csv
+import re
 
 # 設定網頁標題與寬度
-st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
+st.set_page_config(page_title="值班日誌自動生成器-穩定版", layout="wide")
 
 # ================= 系統設定與資料庫初始化 =================
 TEMPLATE_PATH = "template.docx"
 DB_FILE = "handovers.json"
 
-# 載入歷史交班紀錄 (實現關閉不重置)
 def load_handovers():
     if os.path.exists(DB_FILE):
         with open(DB_FILE, "r", encoding="utf-8") as f:
-            try:
-                return json.load(f)
-            except:
-                return []
+            try: return json.load(f)
+            except: return []
     return []
 
-# 儲存交班紀錄
 def save_handovers(data):
     with open(DB_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
-# 初始化 Session State
 if 'handovers' not in st.session_state:
     st.session_state.handovers = load_handovers()
 
-st.title("🏥 醫師病房值班日誌自動生成器")
+st.title("🏥 醫師病房值班日誌自動生成器 (穩定版)")
 
 # ================= 區塊 1：上傳 CSV 數據 =================
 st.header("1. 上傳 HIS 系統匯出檔案")
-st.info("系統已內建 `template.docx` 樣板，您現在只需上傳數據即可。")
 csv_file = st.file_uploader("上傳值班日誌數據 (.csv)", type=['csv'])
 
 # ================= 區塊 2：交班事項登錄表單 =================
 st.header("2. 交班事項登錄")
-
 with st.form("handover_form", clear_on_submit=True):
     st.subheader("新增交班紀錄")
     c1, c2, c3 = st.columns(3)
@@ -56,7 +50,6 @@ with st.form("handover_form", clear_on_submit=True):
     with c3:
         attending_doc = st.text_input("主治醫師")
         diagnosis = st.text_input("診斷")
-        
     content = st.text_area("交班內容 (必填)")
     submitted = st.form_submit_button("確認新增交班")
     
@@ -64,24 +57,22 @@ with st.form("handover_form", clear_on_submit=True):
         if not name or not content:
             st.error("「病人姓名」與「交班內容」為必填欄位！")
         else:
-            new_record = {
+            st.session_state.handovers.append({
                 "is_er": is_er, "name": name, "age": age,
                 "gender": gender, "med_record": med_record,
                 "attending_doc": attending_doc, "diagnosis": diagnosis,
                 "time_occurred": time_occurred.strftime("%H:%M"),
                 "content": content
-            }
-            st.session_state.handovers.append(new_record)
-            save_handovers(st.session_state.handovers) # 立即存檔
+            })
+            save_handovers(st.session_state.handovers)
             st.success(f"已新增 {name} 的交班紀錄！")
             st.rerun()
 
-# ================= 區塊 3：已登錄交班事項 =================
+# ================= 區塊 3：已登錄交班事項預覽 =================
 st.header("3. 已登錄交班事項")
-
 col1, col2 = st.columns([8, 2])
 with col2:
-    if st.button("🗑️ 清空所有交班紀錄", type="secondary", help="值班結束後點此清空"):
+    if st.button("🗑️ 清空所有交班紀錄", type="secondary"):
         st.session_state.handovers = []
         save_handovers([])
         st.rerun()
@@ -90,129 +81,127 @@ if not st.session_state.handovers:
     st.info("目前尚無交班紀錄。")
 else:
     for idx, h in enumerate(st.session_state.handovers):
-        er_tag = "🔴 [ER] " if h["is_er"] else ""
-        title = f"{er_tag}{h['name']} - {h['time_occurred']}"
-        
+        title = f"{'🔴[ER] ' if h['is_er'] else ''}{h['name']} - {h['time_occurred']}"
         with st.expander(title):
-            details = [f"{k}: {h[v]}" for k, v in zip(
-                ["年紀", "性別", "病歷號", "主治醫師", "診斷"], 
-                ["age", "gender", "med_record", "attending_doc", "diagnosis"]
-            ) if h[v]]
-            
-            st.write(" | ".join(details))
+            st.markdown(f"**詳細資料：** {h['age']}歲/{h['gender']} | 病歷：{h['med_record']} | 主治：{h['attending_doc']}")
+            st.markdown(f"**診斷：** {h['diagnosis']}")
             st.markdown(f"**交班內容：**\n{h['content']}")
-            
             if st.button(f"刪除 {h['name']}", key=f"del_{idx}"):
                 st.session_state.handovers.pop(idx)
                 save_handovers(st.session_state.handovers)
                 st.rerun()
 
-# ================= 區塊 4：解析與生成文件 =================
-st.header("4. 確認與輸出")
-
-def process_csv_and_word(csv_data, handovers):
-    # 檢查樣板是否存在
+# ================= 區塊 4：解析與生成核心邏輯 =================
+def process_data(csv_data, handovers):
     if not os.path.exists(TEMPLATE_PATH):
-        raise FileNotFoundError(f"找不到樣板檔案 '{TEMPLATE_PATH}'，請確認檔案名稱與位置。")
-        
+        raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。請確認已上傳 template.docx 到 GitHub。")
+    
     doc = Document(TEMPLATE_PATH)
     
-    # 1. 處理交班事項文字生成
-    handover_text = ""
-    for h in handovers:
-        er_mark = "🚨[ER] " if h["is_er"] else ""
-        handover_text += f"【{er_mark}{h['name']}】 {h['time_occurred']}\n"
-        meta = [h[k] for k in ['age', 'gender', 'med_record', 'attending_doc', 'diagnosis'] if h[k]]
-        if meta: handover_text += f"基本資料：{' / '.join(meta)}\n"
-        handover_text += f"交班內容：{h['content']}\n"
-        handover_text += "-" * 20 + "\n"
+    # 1. 解析 CSV 內容
+    lines = []
+    if csv_data:
+        decoded = csv_data.getvalue().decode("utf-8")
+        lines = list(csv.reader(io.StringIO(decoded)))
+    
+    # 2. 處理日期與基本欄位比對索引
+    idx_map = {}
+    for i, row in enumerate(lines):
+        row_str = "".join(row)
+        if "值班起始日期" in row_str:
+            match = re.search(r'(\d{4})(\d{2})(\d{2})', row_str)
+            if match:
+                y, m, d = match.groups()
+                date_text = f"日期：  {int(y)-1911} 年  {m} 月  {d} 日"
+                for p in doc.paragraphs:
+                    if "日期" in p.text: p.text = date_text
+        if "護理站" in row_str: idx_map["station"] = i
+        if "新入院病人" in row_str: idx_map["new"] = i
+        if "出院病人" in row_str: idx_map["out"] = i
 
-    # 寫入交班事項到「病房特殊狀況及處理：」下方
-    for paragraph in doc.paragraphs:
-        if "病房特殊狀況及處理：" in paragraph.text:
-            paragraph.add_run("\n" + handover_text)
+    # 3. 填寫人數統計表 (Word 表格 0)
+    if "station" in idx_map and len(doc.tables) >= 1:
+        tb = doc.tables[0]
+        for offset in range(1, 7): # 急診到總人數共6列
+            csv_row = lines[idx_map["station"] + offset]
+            if offset < len(tb.rows):
+                tb.cell(offset, 1).text = csv_row[1] # 男
+                tb.cell(offset, 2).text = csv_row[2] # 女
+                tb.cell(offset, 3).text = csv_row[3] # 總數
 
-    # 2. 如果有上傳 CSV，解析並填入表格
-    if csv_data is not None:
-        lines = csv_data.getvalue().decode("utf-8").splitlines()
-        reader = list(csv.reader(lines))
+    # 4. 填寫新入院 (Word 表格 1) - 自動增行
+    if "new" in idx_map and len(doc.tables) >= 2:
+        tb = doc.tables[1]
+        data_rows = []
+        for i in range(idx_map["new"] + 2, len(lines)):
+            if not lines[i] or not lines[i][0].strip() or "出院" in lines[i][0]: break
+            data_rows.append(lines[i])
         
-        # 尋找區塊索引
-        idx_station = idx_new = idx_out = -1
-        for i, row in enumerate(reader):
-            if not row: continue
-            if row[0] == "護理站": idx_station = i
-            elif row[0] == "新入院病人": idx_new = i
-            elif row[0] == "出院病人": idx_out = i
-            
-        # 填入護理站人數 (假設是 Word 中的第 1 個表格)
-        if idx_station != -1 and len(doc.tables) >= 1:
-            table = doc.tables[0]
-            # 對應 CSV: 護理站(急診,二樓,三樓,四樓,五樓,總人數) 在 idx_station + 1 到 + 6
-            for r_offset in range(1, 7):
-                csv_row = reader[idx_station + r_offset]
-                # Word表格的 row 從 1 開始填 (避開標題)
-                word_row_idx = r_offset 
-                if len(csv_row) >= 4 and word_row_idx < len(table.rows):
-                    table.cell(word_row_idx, 1).text = csv_row[1] # 男
-                    table.cell(word_row_idx, 2).text = csv_row[2] # 女
-                    table.cell(word_row_idx, 3).text = csv_row[3] # 總數
+        for i, csv_row in enumerate(data_rows):
+            w_idx = i + 1 # 跳過標題列
+            if w_idx >= len(tb.rows): tb.add_row()
+            tb.cell(w_idx, 0).text = csv_row[0] # 姓名
+            tb.cell(w_idx, 1).text = csv_row[1] # 病歷
+            tb.cell(w_idx, 2).text = csv_row[2] # 床號
+            tb.cell(w_idx, 3).text = csv_row[3] # 性別
+            tb.cell(w_idx, 4).text = csv_row[4] # 年齡
+            tb.cell(w_idx, 5).text = csv_row[5] # 診斷
+            if len(csv_row) > 6: tb.cell(w_idx, 7).text = csv_row[6] # 燈號
 
-        # 填入新入院病人 (假設是 Word 中的第 2 個表格)
-        if idx_new != -1 and len(doc.tables) >= 2:
-            table = doc.tables[1]
-            # 找到實際資料起始點 (跳過「新入院病人」與「欄位名稱」兩行)
-            data_start = idx_new + 2 
-            for i in range(data_start, len(reader)):
-                row = reader[i]
-                if not row or not row[0].strip() or row[0] == "出院病人": break # 遇到空白或下一區塊停止
-                
-                # Word 中預設有空白行，計算目前要填入的 row
-                word_row_idx = i - data_start + 1
-                if word_row_idx < len(table.rows):
-                    table.cell(word_row_idx, 0).text = row[0] # 姓名
-                    table.cell(word_row_idx, 1).text = row[1] # 病歷號
-                    table.cell(word_row_idx, 2).text = row[2] # 床號
-                    table.cell(word_row_idx, 3).text = row[3] # 性別
-                    table.cell(word_row_idx, 4).text = row[4] # 年齡
-                    table.cell(word_row_idx, 5).text = row[5] # 診斷
-                    if len(row) > 6:
-                        table.cell(word_row_idx, 7).text = row[6] # 燈號 (依您的欄位設定放在燈號欄)
+    # 5. 填寫出院 (Word 表格 2) - 自動增行
+    if "out" in idx_map and len(doc.tables) >= 3:
+        tb = doc.tables[2]
+        data_rows = []
+        for i in range(idx_map["out"] + 2, len(lines)):
+            if not lines[i] or not lines[i][0].strip(): break
+            data_rows.append(lines[i])
+        
+        for i, csv_row in enumerate(data_rows):
+            w_idx = i + 1
+            if w_idx >= len(tb.rows): tb.add_row()
+            tb.cell(w_idx, 0).text = csv_row[0]
+            tb.cell(w_idx, 1).text = csv_row[1]
+            tb.cell(w_idx, 2).text = csv_row[2]
+            tb.cell(w_idx, 3).text = csv_row[3]
+            tb.cell(w_idx, 4).text = csv_row[4]
+            tb.cell(w_idx, 5).text = csv_row[5]
+            tb.cell(w_idx, 6).text = csv_row[6] # 出院動態
 
-        # 填入出院病人 (假設是 Word 中的第 3 個表格)
-        if idx_out != -1 and len(doc.tables) >= 3:
-            table = doc.tables[2]
-            data_start = idx_out + 2
-            for i in range(data_start, len(reader)):
-                row = reader[i]
-                if not row or not row[0].strip(): break
-                
-                word_row_idx = i - data_start + 1
-                if word_row_idx < len(table.rows):
-                    table.cell(word_row_idx, 0).text = row[0] # 姓名
-                    table.cell(word_row_idx, 1).text = row[1] # 病歷號
-                    table.cell(word_row_idx, 2).text = row[2] # 床號
-                    table.cell(word_row_idx, 3).text = row[3] # 性別
-                    table.cell(word_row_idx, 4).text = row[4] # 年齡
-                    table.cell(word_row_idx, 5).text = row[5] # 診斷
-                    if len(row) > 6:
-                        table.cell(word_row_idx, 6).text = row[6] # 出院動態
+    # 6. 填寫交班事項 (核心修復)
+    h_text = ""
+    for h in handovers:
+        h_text += f"\n【{'🔴ER' if h['is_er'] else ''}{h['name']}】 {h['time_occurred']}\n"
+        h_text += f"資料：{h['age']}歲/{h['gender']}/{h['med_record']} (主治:{h['attending_doc']})\n"
+        h_text += f"交班：{h['content']}\n" + ("-"*30)
 
-    # 存入記憶體供下載
-    file_stream = io.BytesIO()
-    doc.save(file_stream)
-    file_stream.seek(0)
-    return file_stream
+    # 搜尋所有段落與表格儲存格，確保抓到位置
+    target_found = False
+    for p in doc.paragraphs:
+        if "病房特殊狀況及處理" in p.text.replace(" ", ""):
+            p.add_run(h_text)
+            target_found = True
+    
+    if not target_found: # 如果段落找不到，找表格內
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if "病房特殊狀況及處理" in cell.text:
+                        cell.text += h_text
 
-if st.button("🚀 確認輸出 Word 檔案", type="primary"):
+    stream = io.BytesIO()
+    doc.save(stream)
+    stream.seek(0)
+    return stream
+
+if st.button("🚀 生成並下載 Word 檔案", type="primary"):
     try:
-        final_doc_stream = process_csv_and_word(csv_file, st.session_state.handovers)
-        st.success("檔案生成成功！")
+        final_file = process_data(csv_file, st.session_state.handovers)
+        st.success("檔案已備妥！")
         st.download_button(
-            label="📥 點擊下載今日值班日誌",
-            data=final_doc_stream,
-            file_name="今日值班日誌_已完成.docx",
+            label="📥 點擊下載",
+            data=final_file,
+            file_name="值班日誌_輸出版本.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     except Exception as e:
-        st.error(f"生成檔案時發生錯誤: {e}")
+        st.error(f"錯誤詳情: {e}")
