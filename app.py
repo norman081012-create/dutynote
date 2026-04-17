@@ -147,9 +147,13 @@ def process_data(raw_text, handovers, selected_date):
             if "危險評估" in row_str or "自殺顧慮" in row_str: continue
                 
             if "護理站" in row_str or "急診護理站" in row_str: 
+                # 修正：更寬鬆的護理站名稱抓取
                 st_name = parts[0].replace(" ", "")
-                if st_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"] and len(parts) >= 4:
-                    parsed_stations[st_name] = parts[1:4]
+                # 只要名稱包含關鍵字即可，避免全形半形或多餘字元干擾
+                for key_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
+                    if key_name in st_name and len(parts) >= 4:
+                        parsed_stations[key_name] = parts[1:4]
+                        break
             elif len(parts) >= 5 and "姓名" not in parts[0] and "病患" not in parts[0]:
                 if len(parts) >= 7 and ("紅" in row_str or "黃" in row_str or "綠" in row_str or len(parts[6]) < 4):
                     parsed_new.append(parts)
@@ -165,13 +169,24 @@ def process_data(raw_text, handovers, selected_date):
         for row in table.rows:
             if not row.cells: continue
                 
+            # 修正：更寬鬆的儲存格文字清洗
             c0_text = row.cells[0].text.replace(" ", "").replace("　", "").replace("\xa0", "").strip()
+            # 移除所有可能的換行符號
+            c0_text = re.sub(r'[\r\n\t]', '', c0_text) 
+            
             row_text = "".join([c.text for c in row.cells]).replace(" ", "")
             
             # A. 護理站填寫
-            if c0_text in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
-                if c0_text in parsed_stations and len(row.cells) >= 4:
-                    nums = parsed_stations[c0_text]
+            # 檢查目前這格的文字是否「包含」目標護理站名稱
+            matched_station = None
+            for key_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
+                if key_name in c0_text:
+                    matched_station = key_name
+                    break
+                    
+            if matched_station:
+                if matched_station in parsed_stations and len(row.cells) >= 4:
+                    nums = parsed_stations[matched_station]
                     safe_fill_cell(row.cells[1], nums[0])
                     safe_fill_cell(row.cells[2], nums[1])
                     safe_fill_cell(row.cells[3], nums[2])
