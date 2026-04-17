@@ -87,21 +87,16 @@ st.header("2. 交班事項登錄 (完美流水帳格式)")
 with st.form("handover_form", clear_on_submit=True):
     c1, c2 = st.columns(2)
     with c1:
-        # 修正：病房選項正確預設
         location = st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"])
         name = st.text_input("病人姓名 (必填)")
         age = st.text_input("年紀")
         gender = st.selectbox("性別", ["", "男", "女"])
         med_record = st.text_input("病歷號")
-        # 增加病史輸入
         history_input = st.text_area("內外科病史輸入", height=60)
         
     with c2:
-        # 狀況發生時間預設抓取當時時間
         time_occurred = st.time_input("狀況發生時間", value=datetime.datetime.now().time())
-        # 主治醫師全名選項
         attending_doc = st.selectbox("主治醫師", ATTENDING_DOCS)
-        # 診斷選項連動
         diag_choice = st.selectbox("診斷快速選項", DIAG_CHOICES)
         diag_manual = st.text_input("手動輸入診斷 (若選其他)")
         
@@ -111,7 +106,7 @@ with st.form("handover_form", clear_on_submit=True):
         if not name or not content:
             st.error("「姓名」與「內容」為必填！")
         else:
-            diag_final = diag_manual if diag_choice == "其他 (請於下方輸入)" else diag_choice
+            diag_final = diag_manual if not diag_choice or diag_choice == "其他 (請於下方輸入)" else diag_choice
             st.session_state.handovers.append({
                 "location": location, "name": name, "age": age, "gender": gender,
                 "med_record": med_record, "attending_doc": attending_doc,
@@ -202,8 +197,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                             safe_fill_cell(u_cells[name_col_idx+k], pd[k])
                         out_idx += 1
 
-    # --- 【重要】刪除「討論與講評：」表格以騰出空間防止跑版 ---
-    deleted_discuss = False
+    # --- 刪除「討論與講評：」表格防跑版 ---
     discuss_table_idx = -1
     for idx, table in enumerate(doc.tables):
         first_row_txt = "".join([c.text for c in table.rows[0].cells]).replace(" ","")
@@ -213,15 +207,11 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
             
     if discuss_table_idx != -1:
         table_to_del = doc.tables[discuss_table_idx]
-        # 在刪除前插入一小段空白，保持視覺距離
         p_before = table_to_del.paragraphs[0] if table_to_del.paragraphs else None
         if p_before: p_before.insert_paragraph_before()
-        # 執行刪除
         table_to_del._element.getparent().remove(table_to_del._element)
-        deleted_discuss = True
 
-    # --- 【重要】刪除第一張圖最下面一欄 (危險評估) ---
-    deleted_risk = False
+    # --- 刪除危險評估表格防跑版 ---
     risk_table_idx = -1
     for idx, table in enumerate(doc.tables):
         first_row_txt = "".join([c.text for c in table.rows[0].cells]).replace(" ","")
@@ -232,7 +222,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
     if risk_table_idx != -1:
         table_to_del = doc.tables[risk_table_idx]
         table_to_del._element.getparent().remove(table_to_del._element)
-        deleted_risk = True
 
     # --- 填寫標準流水帳格式交班 ---
     sorted_h = sorted(handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
@@ -248,24 +237,22 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         h_diag = h.get('diagnosis', '')
         h_his = h.get('history', '')
         h_time = h.get('time_occurred', '')
-        # 將內容中的換行取代為空白，強迫不換段
         h_content = h.get('content', '').replace('\n', ' ')
 
-        # 客製化字串防呆與格式化
+        # 格式化各區塊
         med_str = f"病歷號:{h_med} " if h_med else ""
         age_str = f"{h_age}歲" if h_age else ""
         gen_str = f"{h_gen}性" if h_gen else ""
         age_gen_combined = f" {age_str}{gen_str}" if (h_age or h_gen) else ""
         
-        ward_tag = f"({h_loc[0:2]})" if h_loc != "急診" else ""
+        ward_tag = f"({h_loc[0:2]})" if h_loc != "急診" and h_loc != "病房" else ""
         doc_str = f"{h_att}醫師{ward_tag}病人" if h_att else f"{ward_tag}病人"
         
         diag_str = f"，診斷{h_diag}" if h_diag else ""
         his_str = f"，內外科病史:{h_his}" if h_his else ""
         time_str = f" {h_time}時" if h_time else ""
 
-        # 最終流水帳格式組裝
-        line = f"({h_loc})病歷號:{h_name}{age_gen_combined}，{doc_str}{his_str}{diag_str}{time_str}，{h_content}\n"
+        line = f"({h_loc}){med_str}姓名:{h_name}{age_gen_combined}，{doc_str}{his_str}{diag_str}{time_str}，{h_content}\n"
         h_lines.append(line)
 
     final_h_text = "".join(h_lines)
@@ -276,12 +263,10 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         for row in table.rows:
             for cell in get_unique_cells(row):
                 for p in cell.paragraphs:
-                    # 修正：那一欄不可以有字，從下一行填入
                     if "病房特殊狀況及處理" in p.text.replace(" ",""):
                         run = p.add_run(final_h_text)
-                        run.font.size = Pt(12)  # 標準流水帳字體大一些
-                        run.bold = False        # 取消粗體
-                        # 確保文字貼齊格子
+                        run.font.size = Pt(12)
+                        run.bold = False
                         p.paragraph_format.space_before = Pt(0)
                         p.paragraph_format.space_after = Pt(0)
                         inserted = True; break
@@ -304,7 +289,8 @@ st.header("4. 確認與輸出")
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
         f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
-        st.success(f"檔案已備妥！(已自動刪除刪除{'危險評估' if deleted_risk else ''}{'討論表格' if deleted_discuss else ''}以腾出空間)")
+        # 【修正】移除外部變數調用，改為靜態成功訊息
+        st.success("✅ 檔案已更新並備妥！(已自動精簡空白表格以防止跳頁)")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
