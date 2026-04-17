@@ -9,6 +9,10 @@ import json
 import os
 import re
 import datetime
+from datetime import timezone, timedelta
+
+# 設定台灣時區 (UTC+8)，解決雲端伺服器時間誤差問題
+tw_tz = timezone(timedelta(hours=8))
 
 st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 
@@ -34,7 +38,8 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (預覽與防呆 V11)")
+# 【修改點 3】移除 "(預覽與防呆 V11)"
+st.title("🏥 醫師病房值班日誌自動生成器")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -47,8 +52,13 @@ with col_btn:
 
 st.header("1. 貼上 HIS 系統匯出資料")
 col_date, col_text = st.columns([2, 8])
+
+# 取得台灣當下時間
+now_tw = datetime.datetime.now(tw_tz)
+
 with col_date:
-    duty_date = st.date_input("📅 選擇值班日期", datetime.date.today())
+    # 【修改點 1】使用台灣時間的日期
+    duty_date = st.date_input("📅 選擇值班日期", now_tw.date())
 
 def parse_his_data(raw_text):
     parsed_stations = {}
@@ -84,7 +94,8 @@ with col_text:
     parsed_stations, parsed_new, parsed_out = parse_his_data(raw_text_input)
 
 # ================= 區塊 2：交班事項登錄表單 =================
-st.header("2. 交班事項登錄 (完美流水帳格式)")
+# 【修改點 3】移除 "(完美流水帳格式)"
+st.header("2. 交班事項登錄")
 with st.form("handover_form", clear_on_submit=True):
     c1, c2 = st.columns(2)
     with c1:
@@ -96,7 +107,8 @@ with st.form("handover_form", clear_on_submit=True):
         history_input = st.text_area("內外科病史輸入", height=60)
         
     with c2:
-        time_occurred = st.time_input("狀況發生時間", value=datetime.datetime.now().time())
+        # 【修改點 1】使用台灣時間的時間
+        time_occurred = st.time_input("狀況發生時間", value=now_tw.time())
         attending_doc = st.selectbox("主治醫師", ATTENDING_DOCS)
         diag_choice = st.selectbox("診斷快速選項", DIAG_CHOICES)
         diag_manual = st.text_input("手動輸入診斷 (若選其他)")
@@ -124,7 +136,6 @@ if st.session_state.handovers:
     sorted_view = sorted(st.session_state.handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
     for h in sorted_view:
         idx = st.session_state.handovers.index(h)
-        # 即時顯示包含 ?歲 的邏輯
         h_age_disp = h['age'] if h.get('age') else "?"
         h_gen_disp = f"{h['gender']}性" if h.get('gender') else ""
         
@@ -203,7 +214,6 @@ for h in sorted_h:
     h_time = h.get('time_occurred', '').strip()
     h_content = h.get('content', '').replace('\n', ' ').strip()
 
-    # 【新增防呆】：年紀沒填顯示 ?歲
     h_age_display = h_age if h_age else "?"
     h_gen_display = f"{h_gen}性" if h_gen else ""
     age_gen_part = f"，{h_age_display}歲{h_gen_display}"
@@ -212,7 +222,10 @@ for h in sorted_h:
     pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
     
     ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
-    doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else f"{ward_tag}病人"
+    
+    # 【修改點 2】解決未填入醫師會殘留病人的問題：如果沒有主治醫師，則該段直接留白
+    doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else ""
+    
     his_part = f"內外科病史:{h_his}" if h_his else ""
     diag_part = f"診斷:{h_diag}" if h_diag else ""
     time_part = f"{h_time}時" if h_time else ""
@@ -231,7 +244,7 @@ for h in sorted_h:
 if preview_lines:
     with st.expander("👀 點擊展開：最終交班文字預覽 (與 Word 輸出內容相同)", expanded=True):
         st.info("💡 提示：因雲端伺服器未安裝微軟 Word，無法直接預覽 PDF。請確認下方文字與排版無誤後，下載 Word 檔再自行另存為 PDF。")
-        preview_text = "\n\n".join(preview_lines) # 預覽用兩行空白區隔，方便閱讀
+        preview_text = "\n\n".join(preview_lines) 
         st.text_area("即將寫入 Word 的文字：", value=preview_text, height=250, disabled=True)
 
 # --- 2. 生成 Word 檔案 ---
@@ -351,7 +364,8 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
         f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
-        st.success("✅ 檔案已更新並備妥！(已套用 ?歲 顯示邏輯與精準斷行)")
+        # 【修改點 3】移除後方贅字
+        st.success("✅ 檔案已更新並備妥！")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
