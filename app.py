@@ -4,8 +4,8 @@ from docx import Document
 import io
 import json
 import os
-import csv
 import re
+import datetime
 
 st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 
@@ -30,7 +30,7 @@ if 'uploader_key' not in st.session_state:
 
 st.title("🏥 醫師病房值班日誌自動生成器")
 
-# ================= 區塊 1：全局控制與上傳 =================
+# ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
 with col_btn:
     if st.button("🔄 刷新並清空所有資料", type="secondary", use_container_width=True):
@@ -39,26 +39,20 @@ with col_btn:
         st.session_state.uploader_key += 1
         st.rerun()
 
-st.header("1. 上傳 HIS 系統匯出檔案")
-csv_file = st.file_uploader("上傳值班日誌數據 (.csv)", type=['csv'], key=f"csv_uploader_{st.session_state.uploader_key}")
+st.header("1. 貼上 HIS 系統匯出資料")
+col_date, col_text = st.columns([2, 8])
+with col_date:
+    # 讓使用者直接選擇日期，自動轉民國年寫入 Word
+    duty_date = st.date_input("📅 選擇值班日期", datetime.date.today())
 
-# --- 新增：資料預覽與編碼解鎖 ---
-decoded_csv_content = ""
-if csv_file is not None:
-    raw_bytes = csv_file.getvalue()
-    # 嘗試多種台灣常見的醫療系統匯出編碼
-    for encoding in ['utf-8-sig', 'big5', 'cp950', 'utf-8']:
-        try:
-            decoded_csv_content = raw_bytes.decode(encoding)
-            break # 成功解碼就跳出迴圈
-        except UnicodeDecodeError:
-            continue
-            
-    with st.expander("👀 點開預覽：檢查系統讀取到的 CSV 內容 (若為亂碼請確認檔案格式)"):
-        if decoded_csv_content:
-            st.text(decoded_csv_content[:1000]) # 顯示前1000個字元供確認
-        else:
-            st.error("無法解析檔案編碼，請確認是否為標準 CSV 檔。")
+with col_text:
+    # 改為 Text Area 接收直接貼上的文字
+    raw_text_input = st.text_area(
+        "📝 在此貼上資料 (支援直接從 Excel 複製貼上)", 
+        height=200, 
+        key=f"text_input_{st.session_state.uploader_key}",
+        help="請連同標題（如護理站、新入院病人等）一起複製貼上。"
+    )
 
 # ================= 區塊 2：交班事項登錄表單 =================
 st.header("2. 交班事項登錄")
@@ -112,83 +106,99 @@ else:
                 st.rerun()
 
 # ================= 區塊 4：解析與生成核心邏輯 =================
-def process_data(csv_text, handovers):
+def process_data(raw_text, handovers, selected_date):
     if not os.path.exists(TEMPLATE_PATH):
         raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。請確認已上傳樣板。")
     
     doc = Document(TEMPLATE_PATH)
-    lines = []
-    if csv_text:
-        lines = list(csv.reader(io.StringIO(csv_text)))
     
+    # --- 0. 填寫日期 ---
+    roc_year = selected_date.year - 1911
+    date_str = f"日期：  {roc_year} 年  {selected_date.month:02d} 月  {selected_date.day:02d} 日"
+    for p in doc.paragraphs:
+        if "日期" in p.text:
+            p.text = date_str
+            break
+
+    # --- 1. 將貼上的文字轉換為結構化資料 (List of Lists) ---
+    lines = []
+    if raw_text:
+        raw_lines = raw_text.splitlines()
+        for line in raw_lines:
+            if not line.strip(): continue # 略過完全空白的行
+            
+            # 從 Excel 貼上通常會用 Tab 分隔，如果沒有 Tab 則用多個空白分隔
+            if '\t' in line:
+                row = [cell.strip() for cell in line.split('\t')]
+            else:
+                row = [cell.strip() for cell in re.split(r'\s{2,}', line)]
+            lines.append(row)
+    
+    # --- 2. 尋找各區塊表頭的索引位置 ---
     idx_station = idx_new = idx_out = -1
     for i, row in enumerate(lines):
-        # 移除半形空白、全形空白(台灣系統常見)
-        row_str = "".join(row).replace(" ", "").replace("　", "")
+        row_str = "".join(row).replace(" ", "")
         
-        if "值班起始日期" in row_str:
-            match = re.search(r'(\d{4})(\d{2})(\d{2})', row_str)
-            if match:
-                y, m, d = match.groups()
-                for p in doc.paragraphs:
-                    if "日期" in p.text: p.text = f"日期：  {int(y)-1911} 年  {m} 月  {d} 日"
-        
+        # 尋找關鍵字
         if "護理站" in row_str and "病人總數" in row_str: idx_station = i
         elif "病患姓名" in row_str and "入院燈號" in row_str: idx_new = i
         elif "病患姓名" in row_str and "出院動態" in row_str: idx_out = i
 
-    # --- 填寫人數統計表 ---
+    # --- 3. 填寫人數統計表 ---
     if idx_station != -1 and len(doc.tables) >= 1:
         tb = doc.tables[0]
         w_row = 1
         for i in range(idx_station + 1, len(lines)):
             row = lines[i]
-            if not row or not "".join(row).strip(): continue
-            if "病患姓名" in "".join(row): break
+            if not "".join(row).strip(): continue
+            if "病患姓名" in "".join(row) or "新入院" in "".join(row): break # 遇到下一個區塊就停止
+            
             if w_row < len(tb.rows) and len(row) >= 4:
+                # 確保只抓數字，避免抓到雜訊
                 tb.cell(w_row, 1).text = str(row[1]).strip()
                 tb.cell(w_row, 2).text = str(row[2]).strip()
                 tb.cell(w_row, 3).text = str(row[3]).strip()
                 w_row += 1
             if len(row) > 0 and "總人數" in row[0]: break
 
-    # --- 填寫新入院 ---
+    # --- 4. 填寫新入院 ---
     if idx_new != -1 and len(doc.tables) >= 2:
         tb = doc.tables[1]
         w_row = 1
         for i in range(idx_new + 1, len(lines)):
             row = lines[i]
-            if not row or not "".join(row).strip(): continue
+            if not "".join(row).strip(): continue
             if "出院" in "".join(row) or "病患姓名" in "".join(row): break
             if w_row >= len(tb.rows): tb.add_row()
-            # 確保不會因為 CSV 欄位長度不夠而報錯
+            
             if len(row) > 0: tb.cell(w_row, 0).text = str(row[0]).strip()
             if len(row) > 1: tb.cell(w_row, 1).text = str(row[1]).strip()
             if len(row) > 2: tb.cell(w_row, 2).text = str(row[2]).strip()
             if len(row) > 3: tb.cell(w_row, 3).text = str(row[3]).strip()
             if len(row) > 4: tb.cell(w_row, 4).text = str(row[4]).strip()
             if len(row) > 5: tb.cell(w_row, 5).text = str(row[5]).strip()
-            if len(row) > 6: tb.cell(w_row, 7).text = str(row[6]).strip()
+            if len(row) > 6: tb.cell(w_row, 7).text = str(row[6]).strip() # 寫入入院燈號
             w_row += 1
 
-    # --- 填寫出院 ---
+    # --- 5. 填寫出院 ---
     if idx_out != -1 and len(doc.tables) >= 3:
         tb = doc.tables[2]
         w_row = 1
         for i in range(idx_out + 1, len(lines)):
             row = lines[i]
-            if not row or not "".join(row).strip(): continue
+            if not "".join(row).strip(): continue
             if w_row >= len(tb.rows): tb.add_row()
+            
             if len(row) > 0: tb.cell(w_row, 0).text = str(row[0]).strip()
             if len(row) > 1: tb.cell(w_row, 1).text = str(row[1]).strip()
             if len(row) > 2: tb.cell(w_row, 2).text = str(row[2]).strip()
             if len(row) > 3: tb.cell(w_row, 3).text = str(row[3]).strip()
             if len(row) > 4: tb.cell(w_row, 4).text = str(row[4]).strip()
             if len(row) > 5: tb.cell(w_row, 5).text = str(row[5]).strip()
-            if len(row) > 6: tb.cell(w_row, 6).text = str(row[6]).strip()
+            if len(row) > 6: tb.cell(w_row, 6).text = str(row[6]).strip() # 寫入出院動態
             w_row += 1
 
-    # --- 填寫交班事項 ---
+    # --- 6. 填寫交班事項 ---
     sorted_handovers = sorted(handovers, key=lambda x: (not x['is_er'], x['time_occurred']))
     h_text = ""
     for h in sorted_handovers:
@@ -202,6 +212,7 @@ def process_data(csv_text, handovers):
             p.add_run(h_text)
             inserted = True
             break
+            
     if not inserted:
         for table in doc.tables:
             for row in table.rows:
@@ -221,13 +232,13 @@ def process_data(csv_text, handovers):
 st.header("4. 確認與輸出")
 if st.button("🚀 生成並下載 Word 檔案", type="primary"):
     try:
-        # 這裡改傳入已經解碼成功的 decoded_csv_content
-        final_file = process_data(decoded_csv_content, st.session_state.handovers)
+        # 將輸入的文字與選擇的日期傳入函數
+        final_file = process_data(raw_text_input, st.session_state.handovers, duty_date)
         st.success("檔案已更新並備妥！")
         st.download_button(
             label="📥 點擊下載最新版值班日誌",
             data=final_file,
-            file_name="值班日誌_輸出版本.docx",
+            file_name=f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx",
             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
     except Exception as e:
