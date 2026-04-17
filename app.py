@@ -26,10 +26,11 @@ ATTENDING_DOCS_GLOBAL = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟",
 ATTENDING_DOCS_FORM = ["太忙了沒時間問", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
 DIAG_CHOICES_FORM = ["太忙了沒時間問", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
 
-# 年齡選單 (往上 49~1，往下 50~110)
+# 年齡選單 (往上 49~1，預設太忙，往下 50~110)
 age_options = [str(i) for i in range(1, 50)] + ["太忙了沒時間問"] + [str(i) for i in range(50, 111)]
+default_age_idx = age_options.index("太忙了沒時間問")
 
-# --- CSS 樣式注入 (輸入框置中) ---
+# --- CSS 樣式注入 (輸入框置中 & 消除多餘空白) ---
 st.markdown("""
 <style>
 /* 讓文字輸入框置中 */
@@ -40,6 +41,15 @@ div[data-baseweb="input"] input {
 div[data-baseweb="select"] div {
     text-align: center !important;
     justify-content: center !important;
+}
+/* 消除提示框與下方標題之間的空白 */
+div[data-testid="stAlert"] {
+    margin-bottom: 0px !important;
+    padding-top: 10px !important;
+    padding-bottom: 10px !important;
+}
+h2 {
+    padding-top: 0.5rem !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -196,11 +206,10 @@ def cb_delete(idx):
 
 st.title("🏥 醫師病房值班日誌自動生成器")
 
-# 【移至標題下方】溫馨提示
-st.warning("⚠️ **溫馨提示：** 新值班醫師接班時，請務必點擊畫面上方的「🔄 刷新並清空所有資料」，否則將會讀取到前一位醫師的設定檔與暫存資料喔！")
-
 # ================= 區塊 1：全局控制與資料輸入 =================
-col_title, col_btn = st.columns([8, 2])
+col_warn, col_btn = st.columns([8, 2], vertical_alignment="center")
+with col_warn:
+    st.info("⚠️ **溫馨提示：** 新值班醫師接班時，請務必點擊右方的「🔄 刷新並清空所有資料」，否則將會讀取到前一位醫師的設定檔與暫存資料喔！")
 with col_btn:
     st.button("🔄 刷新並清空所有資料", type="secondary", use_container_width=True, on_click=cb_refresh)
 
@@ -251,7 +260,7 @@ c1, c2 = st.columns(2)
 with c1:
     st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"], key="f_loc")
     st.text_input("病人姓名 (必填)", key="f_name")
-    st.selectbox("年紀", age_options, key="f_age")
+    st.selectbox("年紀", age_options, index=default_age_idx, key="f_age")
     st.selectbox("性別", ["", "男", "女"], key="f_gen")
     st.text_input("病歷號", key="f_med")
     st.text_area("內外科病史輸入", height=60, key="f_hist")
@@ -400,30 +409,37 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     
+    # 寫入簽名的小工具 (套用粗體與標楷體)
+    def apply_signature(p_element, doc_name):
+        p_element.text = "" 
+        run_label = p_element.add_run("值班醫師：")
+        if doc_name:
+            run_name = p_element.add_run(f"  {doc_name}")
+            run_name.font.size = Pt(16)
+            run_name.bold = True
+            run_name.font.name = '標楷體'
+            rPr_name = run_name._element.get_or_add_rPr()
+            rPr_name.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
+        p_element.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # 1. 處理一般段落
     for p in doc.paragraphs:
         txt = p.text.replace(" ", "")
-        if "日期" in txt: 
+        if "日期" in txt and ("年" in txt or "月" in txt): 
             p.text = date_str
         elif "值班醫師" in txt:
-            # 強制清空並重新套用專屬字體，完美呈現醫師簽名
-            p.text = "" 
-            run_label = p.add_run("值班醫師：")
-            run_label.font.size = Pt(16)
-            run_label.bold = True
-            run_label.font.name = '標楷體'
-            rPr_label = run_label._element.get_or_add_rPr()
-            rPr_label.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
+            apply_signature(p, selected_doc)
 
-            if selected_doc:
-                run_name = p.add_run(f"  {selected_doc}")
-                run_name.font.size = Pt(16)
-                run_name.bold = True
-                run_name.font.name = '標楷體'
-                rPr_name = run_name._element.get_or_add_rPr()
-                rPr_name.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
-                
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    # 2. 深度處理表格內儲存格 (針對位於表格結尾的簽名欄)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    txt = p.text.replace(" ", "")
+                    if "值班醫師" in txt:
+                        apply_signature(p, selected_doc)
     
+    # HIS 護理站填寫
     for table in doc.tables:
         for row in table.rows:
             u_cells = get_unique_cells(row)
