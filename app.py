@@ -1,8 +1,6 @@
 import streamlit as st
 from docx import Document
 from docx.shared import Pt
-from docx.enum.text import WD_BREAK
-import copy
 import io
 import json
 import os
@@ -30,7 +28,7 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (終極 XML 複製版)")
+st.title("🏥 醫師病房值班日誌自動生成器 (絕對不動格式版)")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -103,23 +101,15 @@ else:
                 save_handovers(st.session_state.handovers)
                 st.rerun()
 
-# ================= 區塊 4：底層 XML 複製與填寫引擎 =================
+# ================= 區塊 4：純文字填空引擎 =================
 def safe_fill_cell(cell, text):
-    """安全填入文字並設定 10pt 大小防撐破表格"""
+    """安全填入純文字：清空原格子，寫入新字並鎖定字體大小以防撐破"""
     if text is None or text == "": return
-    # 清空原有段落
     for p in cell.paragraphs:
-        p.text = ""
-    # 寫入新段落
+        p.text = "" # 清空原有的全形空白或定位點
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     run = p.add_run(str(text))
-    run.font.size = Pt(10)
-
-def clear_row_cells(row):
-    """清空一整列的內容 (用於複製出來的新列)"""
-    for cell in row.cells:
-        for p in cell.paragraphs:
-            p.text = ""
+    run.font.size = Pt(10) # 縮小字體確保不會撐大格子高度
 
 def process_data(raw_text, handovers, selected_date):
     if not os.path.exists(TEMPLATE_PATH):
@@ -127,7 +117,7 @@ def process_data(raw_text, handovers, selected_date):
     
     doc = Document(TEMPLATE_PATH)
     
-    # --- 0. 日期無痕替換 ---
+    # --- 0. 日期純文字替換 ---
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
@@ -138,7 +128,7 @@ def process_data(raw_text, handovers, selected_date):
                 for p in cell.paragraphs:
                     if "日期" in p.text.replace(" ", ""): p.text = date_str
 
-    # --- 1. 文字解析引擎 ---
+    # --- 1. 從貼上的文字萃取資料 ---
     parsed_stations = {}
     parsed_new = []
     parsed_out = []
@@ -151,10 +141,9 @@ def process_data(raw_text, handovers, selected_date):
             parts = [p.strip() for p in line.split('\t')]
             if len(parts) < 2:
                 parts = [p.strip() for p in re.split(r'\s{2,}', line)]
-            
             row_str = "".join(parts).replace(" ", "")
             
-            # --- 危險評估靜默迴避 ---
+            # 迴避危險評估區塊
             if "危險評估" in row_str or "自殺顧慮" in row_str: continue
                 
             if "護理站" in row_str or "急診護理站" in row_str: 
@@ -163,22 +152,20 @@ def process_data(raw_text, handovers, selected_date):
                     parsed_stations[st_name] = parts[1:4]
             elif len(parts) >= 5 and "姓名" not in parts[0] and "病患" not in parts[0]:
                 if len(parts) >= 7 and ("紅" in row_str or "黃" in row_str or "綠" in row_str or len(parts[6]) < 4):
-                    # 簡單判斷：有燈號特徵的歸入新病人
                     parsed_new.append(parts)
                 else:
-                    # 有出院動態長文字特徵的歸入出院病人
                     parsed_out.append(parts)
 
-    # --- 2. Word 原地 XML 複製與填表 ---
+    # --- 2. 尋找空白格子並填入 (絕不增刪任何一行) ---
+    new_idx = 0
+    out_idx = 0
+    
     for table in doc.tables:
-        i = 0
-        while i < len(table.rows):
-            row = table.rows[i]
-            if not row.cells: 
-                i += 1
-                continue
+        fill_mode = None
+        for row in table.rows:
+            if not row.cells: continue
                 
-            c0_text = row.cells[0].text.replace(" ", "").strip()
+            c0_text = row.cells[0].text.replace(" ", "").replace("　", "").replace("\xa0", "").strip()
             row_text = "".join([c.text for c in row.cells]).replace(" ", "")
             
             # A. 護理站填寫
@@ -188,114 +175,77 @@ def process_data(raw_text, handovers, selected_date):
                     safe_fill_cell(row.cells[1], nums[0])
                     safe_fill_cell(row.cells[2], nums[1])
                     safe_fill_cell(row.cells[3], nums[2])
-                i += 1
                 continue
             
-            # B. 新住院病人處理
-            if "姓名" in row_text and "燈號" in row_text:
-                i += 1 # 跳到標題的下一行 (第一行空白欄位)
-                for p_data in parsed_new:
-                    current_row = table.rows[i]
-                    c_check = current_row.cells[0].text.replace(" ", "").strip()
-                    
-                    # 如果這行是空的，直接寫入
-                    if not c_check or c_check == "_" or c_check == "0":
-                        safe_fill_cell(current_row.cells[0], p_data[0])
-                        if len(current_row.cells) > 1 and len(p_data) > 1: safe_fill_cell(current_row.cells[1], p_data[1])
-                        if len(current_row.cells) > 2 and len(p_data) > 2: safe_fill_cell(current_row.cells[2], p_data[2])
-                        if len(current_row.cells) > 3 and len(p_data) > 3: safe_fill_cell(current_row.cells[3], p_data[3])
-                        if len(current_row.cells) > 4 and len(p_data) > 4: safe_fill_cell(current_row.cells[4], p_data[4])
-                        if len(current_row.cells) > 5 and len(p_data) > 5: safe_fill_cell(current_row.cells[5], p_data[5])
-                        if len(current_row.cells) > 7 and len(p_data) > 6: safe_fill_cell(current_row.cells[7], p_data[6])
-                        i += 1
-                    else:
-                        # 空間不夠了！直接複製上一行 (XML Deepcopy) 插入
-                        prev_row = table.rows[i-1]
-                        new_tr = copy.deepcopy(prev_row._tr)
-                        prev_row._tr.addnext(new_tr)
-                        
-                        # 抓取剛複製出來的新列
-                        new_row = table.rows[i]
-                        clear_row_cells(new_row) # 清除複製過來的舊資料
-                        
-                        # 填寫
-                        safe_fill_cell(new_row.cells[0], p_data[0])
-                        if len(new_row.cells) > 1 and len(p_data) > 1: safe_fill_cell(new_row.cells[1], p_data[1])
-                        if len(new_row.cells) > 2 and len(p_data) > 2: safe_fill_cell(new_row.cells[2], p_data[2])
-                        if len(new_row.cells) > 3 and len(p_data) > 3: safe_fill_cell(new_row.cells[3], p_data[3])
-                        if len(new_row.cells) > 4 and len(p_data) > 4: safe_fill_cell(new_row.cells[4], p_data[4])
-                        if len(new_row.cells) > 5 and len(p_data) > 5: safe_fill_cell(new_row.cells[5], p_data[5])
-                        if len(new_row.cells) > 7 and len(p_data) > 6: safe_fill_cell(new_row.cells[7], p_data[6])
-                        i += 1
+            # B. 啟動病人填寫模式
+            if "姓名" in row_text and "病歷" in row_text:
+                if "燈號" in row_text or "強制" in row_text:
+                    fill_mode = "new"
+                elif "動態" in row_text or "出院" in row_text:
+                    fill_mode = "out"
                 continue
-
-            # C. 出院病人處理
-            if "姓名" in row_text and "動態" in row_text:
-                i += 1
-                for p_data in parsed_out:
-                    current_row = table.rows[i]
-                    c_check = current_row.cells[0].text.replace(" ", "").strip()
+                
+            # C. 關閉填寫模式 (遇到下個區塊)
+            if fill_mode and ("出院病人" in c0_text or "危險評估" in c0_text or "自殺顧慮" in c0_text or "病房特殊" in c0_text):
+                fill_mode = None
+                
+            # 判斷這格是不是原廠預留的空行
+            is_empty_cell = (c0_text == "" or c0_text == "_" or c0_text == "0")
+            
+            # D. 填入新住院病人
+            if fill_mode == "new" and is_empty_cell:
+                if new_idx < len(parsed_new):
+                    p_data = parsed_new[new_idx]
+                    safe_fill_cell(row.cells[0], p_data[0])
+                    if len(row.cells) > 1 and len(p_data) > 1: safe_fill_cell(row.cells[1], p_data[1])
+                    if len(row.cells) > 2 and len(p_data) > 2: safe_fill_cell(row.cells[2], p_data[2])
+                    if len(row.cells) > 3 and len(p_data) > 3: safe_fill_cell(row.cells[3], p_data[3])
+                    if len(row.cells) > 4 and len(p_data) > 4: safe_fill_cell(row.cells[4], p_data[4])
+                    if len(row.cells) > 5 and len(p_data) > 5: safe_fill_cell(row.cells[5], p_data[5])
+                    if len(row.cells) > 7 and len(p_data) > 6: safe_fill_cell(row.cells[7], p_data[6])
+                    new_idx += 1
                     
-                    if not c_check or c_check == "_" or c_check == "0":
-                        safe_fill_cell(current_row.cells[0], p_data[0])
-                        if len(current_row.cells) > 1 and len(p_data) > 1: safe_fill_cell(current_row.cells[1], p_data[1])
-                        if len(current_row.cells) > 2 and len(p_data) > 2: safe_fill_cell(current_row.cells[2], p_data[2])
-                        if len(current_row.cells) > 3 and len(p_data) > 3: safe_fill_cell(current_row.cells[3], p_data[3])
-                        if len(current_row.cells) > 4 and len(p_data) > 4: safe_fill_cell(current_row.cells[4], p_data[4])
-                        if len(current_row.cells) > 5 and len(p_data) > 5: safe_fill_cell(current_row.cells[5], p_data[5])
-                        if len(current_row.cells) > 6 and len(p_data) > 6: safe_fill_cell(current_row.cells[6], p_data[6])
-                        i += 1
-                    else:
-                        prev_row = table.rows[i-1]
-                        new_tr = copy.deepcopy(prev_row._tr)
-                        prev_row._tr.addnext(new_tr)
-                        
-                        new_row = table.rows[i]
-                        clear_row_cells(new_row)
-                        
-                        safe_fill_cell(new_row.cells[0], p_data[0])
-                        if len(new_row.cells) > 1 and len(p_data) > 1: safe_fill_cell(new_row.cells[1], p_data[1])
-                        if len(new_row.cells) > 2 and len(p_data) > 2: safe_fill_cell(new_row.cells[2], p_data[2])
-                        if len(new_row.cells) > 3 and len(p_data) > 3: safe_fill_cell(new_row.cells[3], p_data[3])
-                        if len(new_row.cells) > 4 and len(p_data) > 4: safe_fill_cell(new_row.cells[4], p_data[4])
-                        if len(new_row.cells) > 5 and len(p_data) > 5: safe_fill_cell(new_row.cells[5], p_data[5])
-                        if len(new_row.cells) > 6 and len(p_data) > 6: safe_fill_cell(new_row.cells[6], p_data[6])
-                        i += 1
-                continue
+            # E. 填入出院病人
+            elif fill_mode == "out" and is_empty_cell:
+                if out_idx < len(parsed_out):
+                    p_data = parsed_out[out_idx]
+                    safe_fill_cell(row.cells[0], p_data[0])
+                    if len(row.cells) > 1 and len(p_data) > 1: safe_fill_cell(row.cells[1], p_data[1])
+                    if len(row.cells) > 2 and len(p_data) > 2: safe_fill_cell(row.cells[2], p_data[2])
+                    if len(row.cells) > 3 and len(p_data) > 3: safe_fill_cell(row.cells[3], p_data[3])
+                    if len(row.cells) > 4 and len(p_data) > 4: safe_fill_cell(row.cells[4], p_data[4])
+                    if len(row.cells) > 5 and len(p_data) > 5: safe_fill_cell(row.cells[5], p_data[5])
+                    if len(row.cells) > 6 and len(p_data) > 6: safe_fill_cell(row.cells[6], p_data[6])
+                    out_idx += 1
 
-            i += 1 # 移至下一列繼續檢查
-
-    # --- 3. 填寫交班事項 (並強制換頁) ---
+    # --- 3. 填寫交班事項 (純文字附加，不影響後方簽名欄排版) ---
     sorted_handovers = sorted(handovers, key=lambda x: (not x['is_er'], x['time_occurred']))
-    h_text = ""
+    h_text = "\n"
     for h in sorted_handovers:
         h_text += f"【{'🚨ER ' if h['is_er'] else ''}{h['name']}】{h['time_occurred']} | {h['age']}歲/{h['gender']} | 病歷:{h['med_record']}({h['attending_doc']})\n"
         h_text += f"交班：{h['content']}\n"
         h_text += "-"*30 + "\n"
 
+    # 在不改變表格結構的情況下，尋找病房特殊狀況並將交班內容貼在其段落後方
     inserted = False
-    
-    # 在表格內尋找
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
                     if "病房特殊狀況及處理" in p.text.replace(" ", ""):
-                        # 強制加入分頁符號，把這行推到第二頁
-                        p.insert_paragraph_before().add_run().add_break(WD_BREAK.PAGE)
-                        p.add_run("\n" + h_text)
+                        run = p.add_run(h_text)
+                        run.font.size = Pt(11)
                         inserted = True
                         break
                 if inserted: break
             if inserted: break
         if inserted: break
         
-    # 如果不在表格內
     if not inserted:
         for p in doc.paragraphs:
             if "病房特殊狀況及處理" in p.text.replace(" ", ""):
-                p.insert_paragraph_before().add_run().add_break(WD_BREAK.PAGE)
-                p.add_run("\n" + h_text)
+                run = p.add_run(h_text)
+                run.font.size = Pt(11)
                 break
 
     stream = io.BytesIO()
