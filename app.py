@@ -3,7 +3,7 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from copy import deepcopy
-import unicodedata  # 核心升級：用於判斷字元的全形/半形視覺寬度
+import unicodedata
 import io
 import json
 import os
@@ -34,7 +34,7 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (視覺換行 V10)")
+st.title("🏥 醫師病房值班日誌自動生成器 (預覽與防呆 V11)")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -124,7 +124,11 @@ if st.session_state.handovers:
     sorted_view = sorted(st.session_state.handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
     for h in sorted_view:
         idx = st.session_state.handovers.index(h)
-        with st.expander(f"[{h['location']}] {h['name']} - {h['time_occurred']}"):
+        # 即時顯示包含 ?歲 的邏輯
+        h_age_disp = h['age'] if h.get('age') else "?"
+        h_gen_disp = f"{h['gender']}性" if h.get('gender') else ""
+        
+        with st.expander(f"[{h['location']}] {h['name']} ({h_age_disp}歲{h_gen_disp}) - {h['time_occurred']}"):
             st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h['diagnosis']}")
             st.write(f"內容：{h['content']}")
             if st.button(f"刪除 {h['name']}", key=f"del_{idx}"):
@@ -132,7 +136,7 @@ if st.session_state.handovers:
                 save_handovers(st.session_state.handovers)
                 st.rerun()
 
-# ================= 區塊 4：純文字無痕填空引擎 =================
+# ================= 核心工具函數 =================
 def get_unique_cells(row):
     unique_cells = []
     for cell in row.cells:
@@ -153,23 +157,15 @@ def safe_fill_cell(cell, text, font_size=12):
     p.paragraph_format.space_after = Pt(0)
 
 def get_text_width(text):
-    """計算字串的視覺寬度：全形/中文算2，半形/英文數字算1"""
     width = 0
     for char in text:
         if unicodedata.east_asian_width(char) in ('F', 'W', 'A'):
             width += 2
-        else:
-            width += 1
+        else: width += 1
     return width
 
 def visual_smart_chunker(text, max_visual_width=78):
-    """
-    【核心：視覺寬度斷行引擎】
-    依照 A4 紙張與 12pt 字體的極限，預設每行總寬度為 78 (約 39 個中文字)。
-    遇到滿格時，自動將下一個完整的詞移至下一列。
-    """
     if not text: return []
-    # 切割為英文單字/數字塊，或獨立的中文字元/符號
     tokens = re.findall(r'[a-zA-Z0-9.\-\_]+|.', text)
     chunks = []
     current_chunk = ""
@@ -177,34 +173,79 @@ def visual_smart_chunker(text, max_visual_width=78):
     
     for token in tokens:
         token_width = get_text_width(token)
-        # 如果加上這個詞會超出版面，就把目前的行存起來，換下一行
         if current_width + token_width > max_visual_width:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
+            if current_chunk: chunks.append(current_chunk.strip())
             current_chunk = token.lstrip()
             current_width = get_text_width(current_chunk)
         else:
             current_chunk += token
             current_width += token_width
             
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-        
+    if current_chunk: chunks.append(current_chunk.strip())
     return chunks
 
-def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
-    if not os.path.exists(TEMPLATE_PATH):
-        raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。請確認已將樣板放在同一資料夾中。")
+# ================= 區塊 4：預覽與輸出 =================
+st.header("4. 預覽與輸出")
+
+# --- 1. 產生預覽文字 (供畫面顯示) ---
+preview_lines = []
+sorted_h = sorted(st.session_state.handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
+
+for h in sorted_h:
+    h_loc = h.get('location', '病房')
+    h_name = h.get('name', '').strip()
+    h_age = h.get('age', '').strip()
+    h_gen = h.get('gender', '').strip()
+    h_med = h.get('med_record', '').strip()
+    h_att = h.get('attending_doc', '').strip()
+    h_diag = h.get('diagnosis', '').strip()
+    h_his = h.get('history', '').strip()
+    h_time = h.get('time_occurred', '').strip()
+    h_content = h.get('content', '').replace('\n', ' ').strip()
+
+    # 【新增防呆】：年紀沒填顯示 ?歲
+    h_age_display = h_age if h_age else "?"
+    h_gen_display = f"{h_gen}性" if h_gen else ""
+    age_gen_part = f"，{h_age_display}歲{h_gen_display}"
+
+    med_part = f"病歷號:{h_med} " if h_med else ""
+    pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
+    
+    ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
+    doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else f"{ward_tag}病人"
+    his_part = f"內外科病史:{h_his}" if h_his else ""
+    diag_part = f"診斷:{h_diag}" if h_diag else ""
+    time_part = f"{h_time}時" if h_time else ""
+    
+    diag_time = ""
+    if diag_part and time_part: diag_time = f"{diag_part} {time_part}"
+    elif diag_part: diag_time = diag_part
+    elif time_part: diag_time = time_part
         
+    components = [pt_part, doc_part, his_part, diag_time, h_content]
+    components = [c for c in components if c.strip()]
+    full_line = "，".join(components)
+    preview_lines.append(full_line)
+
+# 顯示網頁預覽區
+if preview_lines:
+    with st.expander("👀 點擊展開：最終交班文字預覽 (與 Word 輸出內容相同)", expanded=True):
+        st.info("💡 提示：因雲端伺服器未安裝微軟 Word，無法直接預覽 PDF。請確認下方文字與排版無誤後，下載 Word 檔再自行另存為 PDF。")
+        preview_text = "\n\n".join(preview_lines) # 預覽用兩行空白區隔，方便閱讀
+        st.text_area("即將寫入 Word 的文字：", value=preview_text, height=250, disabled=True)
+
+# --- 2. 生成 Word 檔案 ---
+def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
+    if not os.path.exists(TEMPLATE_PATH): raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。")
     doc = Document(TEMPLATE_PATH)
     
-    # --- 填寫日期 ---
+    # 填寫日期
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
         if "日期" in p.text.replace(" ", ""): p.text = date_str
     
-    # --- HIS表格填寫 ---
+    # HIS表格填寫
     new_idx, out_idx = 0, 0
     for table in doc.tables:
         fill_mode, name_col_idx = None, 0
@@ -245,15 +286,13 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                             safe_fill_cell(u_cells[name_col_idx+k], pd[k], font_size=10)
                         out_idx += 1
 
-    # --- 危險評估瘦身：保留 4 列 ---
+    # 危險評估瘦身：保留 4 列
     for table in doc.tables:
         header_row_idx = -1
         for i, row in enumerate(table.rows):
             row_txt = "".join([c.text for c in get_unique_cells(row)]).replace(" ", "")
             if "自殺顧慮" in row_txt and "哽塞顧慮" in row_txt:
-                header_row_idx = i
-                break
-        
+                header_row_idx = i; break
         if header_row_idx != -1:
             target_row_count = header_row_idx + 5
             while len(table.rows) > target_row_count:
@@ -261,52 +300,15 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                 row_to_del._element.getparent().remove(row_to_del._element)
             break
 
-    # --- 填寫交班與視覺斷行 ---
-    sorted_h = sorted(handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
-    
+    # 交班字串組裝與斷行
     all_chunks_to_fill = []
-    for i, h in enumerate(sorted_h):
-        h_loc = h.get('location', '病房')
-        h_name = h.get('name', '').strip()
-        h_age = h.get('age', '').strip()
-        h_gen = h.get('gender', '').strip()
-        h_med = h.get('med_record', '').strip()
-        h_att = h.get('attending_doc', '').strip()
-        h_diag = h.get('diagnosis', '').strip()
-        h_his = h.get('history', '').strip()
-        h_time = h.get('time_occurred', '').strip()
-        h_content = h.get('content', '').replace('\n', ' ').strip()
-
-        med_part = f"病歷號:{h_med} " if h_med else ""
-        age_gen_part = f"，{h_age}歲{h_gen}性" if (h_age or h_gen) else ""
-        pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
-        
-        ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
-        doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else f"{ward_tag}病人"
-        
-        his_part = f"內外科病史:{h_his}" if h_his else ""
-        
-        diag_part = f"診斷:{h_diag}" if h_diag else ""
-        time_part = f"{h_time}時" if h_time else ""
-        
-        diag_time = ""
-        if diag_part and time_part: diag_time = f"{diag_part} {time_part}"
-        elif diag_part: diag_time = diag_part
-        elif time_part: diag_time = time_part
-            
-        components = [pt_part, doc_part, his_part, diag_time, h_content]
-        components = [c for c in components if c.strip()]
-        full_line = "，".join(components)
-        
-        # 啟動視覺寬度斷行引擎
-        chunks = visual_smart_chunker(full_line, max_visual_width=78)
+    for i, line in enumerate(preview_lines):
+        chunks = visual_smart_chunker(line, max_visual_width=78)
         all_chunks_to_fill.extend(chunks)
-        
-        # 病人間空一列
-        if i < len(sorted_h) - 1:
+        if i < len(preview_lines) - 1:
             all_chunks_to_fill.append("")
 
-    # --- 逐列填入表格 ---
+    # 逐列填入表格
     target_table = None
     start_row_idx = -1
     discuss_row_idx = -1
@@ -317,11 +319,9 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
             if not u_cells: continue
             row_txt = u_cells[0].text.replace(" ", "")
             if "病房特殊狀況及處理" in row_txt:
-                target_table = table
-                start_row_idx = idx + 1 
+                target_table = table; start_row_idx = idx + 1 
             if "討論與講評" in row_txt and start_row_idx != -1:
-                discuss_row_idx = idx
-                break
+                discuss_row_idx = idx; break
         if target_table and discuss_row_idx != -1: break
 
     if target_table and start_row_idx != -1 and discuss_row_idx != -1:
@@ -336,7 +336,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                 blank_tr = deepcopy(target_table.rows[discuss_row_idx - 1]._tr)
                 ref_row._tr.addprevious(blank_tr)
                 discuss_row_idx += 1
-                
                 target_cell = get_unique_cells(target_table.rows[current_row_idx])[0]
                 safe_fill_cell(target_cell, chunk_text, font_size=12)
                 current_row_idx += 1
@@ -349,11 +348,10 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
     stream = io.BytesIO(); doc.save(stream); stream.seek(0)
     return stream
 
-st.header("4. 確認與輸出")
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
         f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
-        st.success("✅ 檔案已更新並備妥！(視覺寬度引擎啟動，精準對齊不破字)")
+        st.success("✅ 檔案已更新並備妥！(已套用 ?歲 顯示邏輯與精準斷行)")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
