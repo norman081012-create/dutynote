@@ -44,12 +44,58 @@ col_date, col_text = st.columns([2, 8])
 with col_date:
     duty_date = st.date_input("📅 選擇值班日期", datetime.date.today())
 
+# === 即時解析引擎 (解決黑箱問題) ===
+def parse_his_data(raw_text):
+    parsed_stations = {}
+    parsed_new = []
+    parsed_out = []
+    if raw_text:
+        for line in raw_text.splitlines():
+            line = line.strip()
+            if not line: continue
+            
+            parts = [p.strip() for p in line.split('\t')]
+            if len(parts) < 2:
+                parts = [p.strip() for p in re.split(r'\s{2,}', line)]
+            row_str = "".join(parts).replace(" ", "")
+            
+            # 迴避危險評估區塊
+            if "危險評估" in row_str or "自殺顧慮" in row_str: continue
+            
+            # 抓取護理站與總人數
+            matched_station = False
+            for key_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
+                if key_name in row_str and len(parts) >= 4:
+                    for idx, p in enumerate(parts):
+                        if key_name in p.replace(" ", ""):
+                            if idx + 3 < len(parts):
+                                parsed_stations[key_name] = parts[idx+1 : idx+4]
+                            matched_station = True
+                            break
+                    if matched_station: break
+            if matched_station: continue
+            
+            # 抓取病患
+            if len(parts) >= 5 and "姓名" not in row_str and "病患" not in row_str:
+                if len(parts) >= 7 and ("紅" in row_str or "黃" in row_str or "綠" in row_str or len(parts[6]) < 4):
+                    parsed_new.append(parts)
+                else:
+                    parsed_out.append(parts)
+    return parsed_stations, parsed_new, parsed_out
+
 with col_text:
     raw_text_input = st.text_area(
         "📝 在此貼上資料 (從 Excel 複製包含護理站與病人的區塊)", 
         height=200, 
         key=f"text_input_{st.session_state.uploader_key}"
     )
+    
+    # 實時預覽抓取結果
+    parsed_stations, parsed_new, parsed_out = parse_his_data(raw_text_input)
+    if parsed_stations or parsed_new or parsed_out:
+        with st.expander("👀 點擊查看系統成功抓取的 HIS 資料 (確保沒漏抓)"):
+            st.write(f"✅ 成功抓取 **{len(parsed_stations)}** 個護理站/總人數數據、**{len(parsed_new)}** 位新住院、**{len(parsed_out)}** 位出院")
+            st.json({"護理站統計": parsed_stations, "新住院病人": parsed_new, "出院病人": parsed_out})
 
 # ================= 區塊 2：交班事項登錄表單 =================
 st.header("2. 交班事項登錄")
@@ -101,23 +147,23 @@ else:
                 save_handovers(st.session_state.handovers)
                 st.rerun()
 
-# ================= 區塊 4：純文字填空引擎 =================
+# ================= 區塊 4：純文字無痕對位填表引擎 =================
 def safe_fill_cell(cell, text):
-    """安全填入純文字：清空原格子，寫入新字並鎖定字體大小以防撐破"""
+    """安全填入純文字並縮小字體以防撐破表格"""
     if text is None or text == "": return
     for p in cell.paragraphs:
-        p.text = "" # 清空原有的全形空白或定位點
+        p.text = "" 
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     run = p.add_run(str(text))
-    run.font.size = Pt(10) # 縮小字體確保不會撐大格子高度
+    run.font.size = Pt(10)
 
-def process_data(raw_text, handovers, selected_date):
+def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, selected_date):
     if not os.path.exists(TEMPLATE_PATH):
         raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。請確認已將樣板放在同一資料夾中。")
     
     doc = Document(TEMPLATE_PATH)
     
-    # --- 0. 日期純文字替換 ---
+    # --- 0. 日期無痕替換 ---
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
@@ -128,112 +174,86 @@ def process_data(raw_text, handovers, selected_date):
                 for p in cell.paragraphs:
                     if "日期" in p.text.replace(" ", ""): p.text = date_str
 
-    # --- 1. 從貼上的文字萃取資料 ---
-    parsed_stations = {}
-    parsed_new = []
-    parsed_out = []
-    
-    if raw_text:
-        for line in raw_text.splitlines():
-            line = line.strip()
-            if not line: continue
-            
-            parts = [p.strip() for p in line.split('\t')]
-            if len(parts) < 2:
-                parts = [p.strip() for p in re.split(r'\s{2,}', line)]
-            row_str = "".join(parts).replace(" ", "")
-            
-            # 迴避危險評估區塊
-            if "危險評估" in row_str or "自殺顧慮" in row_str: continue
-                
-            if "護理站" in row_str or "急診護理站" in row_str: 
-                # 修正：更寬鬆的護理站名稱抓取
-                st_name = parts[0].replace(" ", "")
-                # 只要名稱包含關鍵字即可，避免全形半形或多餘字元干擾
-                for key_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
-                    if key_name in st_name and len(parts) >= 4:
-                        parsed_stations[key_name] = parts[1:4]
-                        break
-            elif len(parts) >= 5 and "姓名" not in parts[0] and "病患" not in parts[0]:
-                if len(parts) >= 7 and ("紅" in row_str or "黃" in row_str or "綠" in row_str or len(parts[6]) < 4):
-                    parsed_new.append(parts)
-                else:
-                    parsed_out.append(parts)
-
-    # --- 2. 尋找空白格子並填入 (絕不增刪任何一行) ---
+    # --- 1. 導彈級自動對位填寫 (絕對不增刪行) ---
     new_idx = 0
     out_idx = 0
     
     for table in doc.tables:
         fill_mode = None
+        name_col_idx = 0 # 紀錄「姓名」到底在哪一格
+        
         for row in table.rows:
             if not row.cells: continue
                 
-            # 修正：更寬鬆的儲存格文字清洗
-            c0_text = row.cells[0].text.replace(" ", "").replace("　", "").replace("\xa0", "").strip()
-            # 移除所有可能的換行符號
-            c0_text = re.sub(r'[\r\n\t]', '', c0_text) 
+            row_text_all = "".join([c.text for c in row.cells]).replace(" ", "").replace("　", "").replace("\xa0", "")
             
-            row_text = "".join([c.text for c in row.cells]).replace(" ", "")
-            
-            # A. 護理站填寫
-            # 檢查目前這格的文字是否「包含」目標護理站名稱
+            # A. 護理站導彈鎖定填寫
             matched_station = None
             for key_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
-                if key_name in c0_text:
+                if key_name in row_text_all:
                     matched_station = key_name
                     break
                     
-            if matched_station:
-                if matched_station in parsed_stations and len(row.cells) >= 4:
+            if matched_station and matched_station in parsed_stations:
+                target_idx = -1
+                for idx, cell in enumerate(row.cells):
+                    if matched_station in cell.text.replace(" ", "").replace("　", ""):
+                        target_idx = idx
+                        break
+                if target_idx != -1 and target_idx + 3 < len(row.cells):
                     nums = parsed_stations[matched_station]
-                    safe_fill_cell(row.cells[1], nums[0])
-                    safe_fill_cell(row.cells[2], nums[1])
-                    safe_fill_cell(row.cells[3], nums[2])
+                    safe_fill_cell(row.cells[target_idx+1], nums[0])
+                    safe_fill_cell(row.cells[target_idx+2], nums[1])
+                    safe_fill_cell(row.cells[target_idx+3], nums[2])
                 continue
             
-            # B. 啟動病人填寫模式
-            if "姓名" in row_text and "病歷" in row_text:
-                if "燈號" in row_text or "強制" in row_text:
+            # B. 啟動病人填寫模式並鎖定欄位
+            if "姓名" in row_text_all and "病歷" in row_text_all:
+                if "燈號" in row_text_all or "強制" in row_text_all:
                     fill_mode = "new"
-                elif "動態" in row_text or "出院" in row_text:
+                elif "動態" in row_text_all or "出院" in row_text_all:
                     fill_mode = "out"
+                
+                for idx, cell in enumerate(row.cells):
+                    if "姓名" in cell.text.replace(" ", "").replace("　", ""):
+                        name_col_idx = idx
+                        break
                 continue
                 
-            # C. 關閉填寫模式 (遇到下個區塊)
-            if fill_mode and ("出院病人" in c0_text or "危險評估" in c0_text or "自殺顧慮" in c0_text or "病房特殊" in c0_text):
+            # C. 關閉填寫模式
+            if fill_mode and ("出院病人" in row_text_all or "危險評估" in row_text_all or "自殺顧慮" in row_text_all or "病房特殊" in row_text_all):
                 fill_mode = None
                 
             # 判斷這格是不是原廠預留的空行
-            is_empty_cell = (c0_text == "" or c0_text == "_" or c0_text == "0")
-            
-            # D. 填入新住院病人
-            if fill_mode == "new" and is_empty_cell:
-                if new_idx < len(parsed_new):
+            if fill_mode and name_col_idx < len(row.cells):
+                c_name = row.cells[name_col_idx].text.replace(" ", "").replace("_", "").replace("0", "").strip()
+                is_empty_cell = (c_name == "")
+                
+                # D. 填入新住院病人
+                if fill_mode == "new" and is_empty_cell and new_idx < len(parsed_new):
                     p_data = parsed_new[new_idx]
-                    safe_fill_cell(row.cells[0], p_data[0])
-                    if len(row.cells) > 1 and len(p_data) > 1: safe_fill_cell(row.cells[1], p_data[1])
-                    if len(row.cells) > 2 and len(p_data) > 2: safe_fill_cell(row.cells[2], p_data[2])
-                    if len(row.cells) > 3 and len(p_data) > 3: safe_fill_cell(row.cells[3], p_data[3])
-                    if len(row.cells) > 4 and len(p_data) > 4: safe_fill_cell(row.cells[4], p_data[4])
-                    if len(row.cells) > 5 and len(p_data) > 5: safe_fill_cell(row.cells[5], p_data[5])
-                    if len(row.cells) > 7 and len(p_data) > 6: safe_fill_cell(row.cells[7], p_data[6])
+                    safe_fill_cell(row.cells[name_col_idx], p_data[0])
+                    if len(row.cells) > name_col_idx+1 and len(p_data) > 1: safe_fill_cell(row.cells[name_col_idx+1], p_data[1])
+                    if len(row.cells) > name_col_idx+2 and len(p_data) > 2: safe_fill_cell(row.cells[name_col_idx+2], p_data[2])
+                    if len(row.cells) > name_col_idx+3 and len(p_data) > 3: safe_fill_cell(row.cells[name_col_idx+3], p_data[3])
+                    if len(row.cells) > name_col_idx+4 and len(p_data) > 4: safe_fill_cell(row.cells[name_col_idx+4], p_data[4])
+                    if len(row.cells) > name_col_idx+5 and len(p_data) > 5: safe_fill_cell(row.cells[name_col_idx+5], p_data[5])
+                    if len(row.cells) > name_col_idx+7 and len(p_data) > 6: safe_fill_cell(row.cells[name_col_idx+7], p_data[6]) # 燈號
                     new_idx += 1
-                    
-            # E. 填入出院病人
-            elif fill_mode == "out" and is_empty_cell:
-                if out_idx < len(parsed_out):
+                        
+                # E. 填入出院病人
+                elif fill_mode == "out" and is_empty_cell and out_idx < len(parsed_out):
                     p_data = parsed_out[out_idx]
-                    safe_fill_cell(row.cells[0], p_data[0])
-                    if len(row.cells) > 1 and len(p_data) > 1: safe_fill_cell(row.cells[1], p_data[1])
-                    if len(row.cells) > 2 and len(p_data) > 2: safe_fill_cell(row.cells[2], p_data[2])
-                    if len(row.cells) > 3 and len(p_data) > 3: safe_fill_cell(row.cells[3], p_data[3])
-                    if len(row.cells) > 4 and len(p_data) > 4: safe_fill_cell(row.cells[4], p_data[4])
-                    if len(row.cells) > 5 and len(p_data) > 5: safe_fill_cell(row.cells[5], p_data[5])
-                    if len(row.cells) > 6 and len(p_data) > 6: safe_fill_cell(row.cells[6], p_data[6])
+                    safe_fill_cell(row.cells[name_col_idx], p_data[0])
+                    if len(row.cells) > name_col_idx+1 and len(p_data) > 1: safe_fill_cell(row.cells[name_col_idx+1], p_data[1])
+                    if len(row.cells) > name_col_idx+2 and len(p_data) > 2: safe_fill_cell(row.cells[name_col_idx+2], p_data[2])
+                    if len(row.cells) > name_col_idx+3 and len(p_data) > 3: safe_fill_cell(row.cells[name_col_idx+3], p_data[3])
+                    if len(row.cells) > name_col_idx+4 and len(p_data) > 4: safe_fill_cell(row.cells[name_col_idx+4], p_data[4])
+                    if len(row.cells) > name_col_idx+5 and len(p_data) > 5: safe_fill_cell(row.cells[name_col_idx+5], p_data[5])
+                    if len(row.cells) > name_col_idx+6 and len(p_data) > 6: safe_fill_cell(row.cells[name_col_idx+6], p_data[6]) # 動態
                     out_idx += 1
 
-    # --- 3. 填寫交班事項 (純文字附加，不影響後方簽名欄排版) ---
+    # --- 2. 填寫交班事項 (純文字附加，不影響後方簽名欄排版) ---
     sorted_handovers = sorted(handovers, key=lambda x: (not x['is_er'], x['time_occurred']))
     h_text = "\n"
     for h in sorted_handovers:
@@ -241,7 +261,6 @@ def process_data(raw_text, handovers, selected_date):
         h_text += f"交班：{h['content']}\n"
         h_text += "-"*30 + "\n"
 
-    # 在不改變表格結構的情況下，尋找病房特殊狀況並將交班內容貼在其段落後方
     inserted = False
     for table in doc.tables:
         for row in table.rows:
@@ -271,8 +290,8 @@ def process_data(raw_text, handovers, selected_date):
 st.header("4. 確認與輸出")
 if st.button("🚀 生成並下載 Word 檔案", type="primary"):
     try:
-        final_file = process_data(raw_text_input, st.session_state.handovers, duty_date)
-        st.success("檔案已更新並備妥！")
+        final_file = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
+        st.success("檔案已更新並備妥！(已完美套用原廠樣板與防呆機制)")
         st.download_button(
             label="📥 點擊下載最新版值班日誌",
             data=final_file,
