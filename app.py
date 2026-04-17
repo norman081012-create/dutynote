@@ -96,7 +96,7 @@ def parse_his_data(raw_text):
     return parsed_stations, parsed_new, parsed_out
 
 def parse_prn_data(raw_text):
-    """解析 PRN 藥物文字並按醫師分類 (套用 > 4 個英文字母篩選邏輯)"""
+    """解析 PRN 藥物文字並按醫師分類 (套用 > 4 個英文字母篩選邏輯，無空行)"""
     if not raw_text.strip(): return ""
     doc_map = {}
     for line in raw_text.splitlines():
@@ -105,26 +105,23 @@ def parse_prn_data(raw_text):
         
         name = parts[1]
         att = parts[3]
-        med_full = parts[5] # 這是包含了藥物名稱的字串
+        med_full = parts[5] 
         
-        # 尋找第一組連續的英文字母
         match = re.search(r'[A-Za-z]+', med_full)
-        if not match: continue # 如果沒有英文字母則跳過
+        if not match: continue 
         
         med = match.group(0)
         
-        # 核心防呆：超過 4 個英文字母才抓 (完美過濾掉 "If BW > 4%" 的 "If")
         if len(med) <= 4: continue
         
         if att not in doc_map: doc_map[att] = {}
         if name not in doc_map[att]: doc_map[att][name] = []
         
-        # 避免同一個病人重複紀錄相同的藥物
         if med not in doc_map[att][name]: 
             doc_map[att][name].append(med)
     
     output_lines = []
-    # 依照 ATTENDING_DOCS_GLOBAL 的順序輸出
+    # 依照 ATTENDING_DOCS_GLOBAL 的順序輸出，醫師間不留空行
     for doc in ATTENDING_DOCS_GLOBAL:
         if doc and doc in doc_map:
             pt_list = []
@@ -132,6 +129,7 @@ def parse_prn_data(raw_text):
                 pt_list.append(f"{pt}{'+'.join(meds)}")
             output_lines.append(f"{doc}：{'，'.join(pt_list)}")
     
+    # 這裡只用一個 \n 連接，確保沒有多餘空行
     if output_lines:
         return "【PRN 藥物使用】\n" + "\n".join(output_lines)
     return ""
@@ -291,7 +289,7 @@ with c2:
     st.time_input("狀況發生時間", key="f_time")
     st.selectbox("主治醫師", ATTENDING_DOCS_FORM, key="f_doc")
     st.selectbox("診斷快速選項", DIAG_CHOICES_FORM, key="f_diag_c")
-    st.text_input("手動輸入診斷 (若選其他)", key="f_diag_m")
+    st.text_input("手手動輸入診斷 (若選其他)", key="f_diag_m")
     st.checkbox("🚨 特別交班", key="f_special")
     
 st.text_area("交班內容 (必填)", key="f_content")
