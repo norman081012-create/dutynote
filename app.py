@@ -38,21 +38,30 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-# --- 表單狀態初始化 (解決時間跳動與保留暫存的問題) ---
+# --- 表單狀態初始化 ---
 now_tw = datetime.datetime.now(tw_tz)
 if "f_loc" not in st.session_state:
     st.session_state.update({
         "f_loc": "病房", "f_name": "", "f_age": "50", "f_gen": "",
         "f_med": "", "f_hist": "", "f_time": now_tw.time(),
-        "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": ""
+        "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": "",
+        "add_error": False
     })
 
+# ================= Callback 函數區 (完美解決 StreamlitAPIException) =================
 def clear_form():
-    st.session_state.update({
-        "f_loc": "病房", "f_name": "", "f_age": "50", "f_gen": "",
-        "f_med": "", "f_hist": "", "f_time": datetime.datetime.now(tw_tz).time(),
-        "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": ""
-    })
+    st.session_state.f_loc = "病房"
+    st.session_state.f_name = ""
+    st.session_state.f_age = "50"
+    st.session_state.f_gen = ""
+    st.session_state.f_med = ""
+    st.session_state.f_hist = ""
+    st.session_state.f_time = datetime.datetime.now(tw_tz).time()
+    st.session_state.f_doc = ""
+    st.session_state.f_diag_c = ""
+    st.session_state.f_diag_m = ""
+    st.session_state.f_content = ""
+    st.session_state.add_error = False
 
 def load_form(h):
     st.session_state.f_loc = h.get("location", "病房")
@@ -64,7 +73,7 @@ def load_form(h):
     try:
         st.session_state.f_time = datetime.datetime.strptime(h.get("time_occurred", "00:00"), "%H:%M").time()
     except:
-        st.session_state.f_time = now_tw.time()
+        st.session_state.f_time = datetime.datetime.now(tw_tz).time()
     st.session_state.f_doc = h.get("attending_doc", "")
     diag = h.get("diagnosis", "")
     if diag in DIAG_CHOICES:
@@ -75,17 +84,46 @@ def load_form(h):
         st.session_state.f_diag_m = diag
     st.session_state.f_content = h.get("content", "")
 
+def cb_refresh():
+    st.session_state.handovers = []
+    save_handovers([])
+    clear_form()
+    st.session_state.uploader_key += 1
+
+def cb_add():
+    if not st.session_state.f_name or not st.session_state.f_content:
+        st.session_state.add_error = True
+    else:
+        st.session_state.add_error = False
+        diag_final = st.session_state.f_diag_m if not st.session_state.f_diag_c or st.session_state.f_diag_c == "其他 (請於下方輸入)" else st.session_state.f_diag_c
+        st.session_state.handovers.append({
+            "location": st.session_state.f_loc, "name": st.session_state.f_name, 
+            "age": st.session_state.f_age, "gender": st.session_state.f_gen,
+            "med_record": st.session_state.f_med, "attending_doc": st.session_state.f_doc,
+            "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
+            "diagnosis": diag_final, "history": st.session_state.f_hist,
+            "is_er": (st.session_state.f_loc == "急診") 
+        })
+        save_handovers(st.session_state.handovers)
+        clear_form()
+
+def cb_edit(idx, h):
+    load_form(h)
+    st.session_state.handovers.pop(idx)
+    save_handovers(st.session_state.handovers)
+
+def cb_delete(idx):
+    st.session_state.handovers.pop(idx)
+    save_handovers(st.session_state.handovers)
+
+# ===========================================================================
+
 st.title("🏥 醫師病房值班日誌自動生成器")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
 with col_btn:
-    if st.button("🔄 刷新並清空所有資料", type="secondary", use_container_width=True):
-        st.session_state.handovers = []
-        save_handovers([])
-        clear_form()
-        st.session_state.uploader_key += 1
-        st.rerun()
+    st.button("🔄 刷新並清空所有資料", type="secondary", use_container_width=True, on_click=cb_refresh)
 
 st.header("1. 貼上 HIS 系統匯出資料")
 col_date, col_text = st.columns([2, 8])
@@ -151,27 +189,12 @@ st.text_area("交班內容 (必填)", key="f_content")
 # 按鈕區塊
 btn_col1, btn_col2, btn_col3 = st.columns([2, 1, 1])
 with btn_col1:
-    if st.button("✅ 確認新增交班", type="primary", use_container_width=True):
-        if not st.session_state.f_name or not st.session_state.f_content:
-            st.error("「姓名」與「內容」為必填！")
-        else:
-            diag_final = st.session_state.f_diag_m if not st.session_state.f_diag_c or st.session_state.f_diag_c == "其他 (請於下方輸入)" else st.session_state.f_diag_c
-            st.session_state.handovers.append({
-                "location": st.session_state.f_loc, "name": st.session_state.f_name, 
-                "age": st.session_state.f_age, "gender": st.session_state.f_gen,
-                "med_record": st.session_state.f_med, "attending_doc": st.session_state.f_doc,
-                "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
-                "diagnosis": diag_final, "history": st.session_state.f_hist,
-                "is_er": (st.session_state.f_loc == "急診") 
-            })
-            save_handovers(st.session_state.handovers)
-            clear_form()
-            st.rerun()
+    st.button("✅ 確認新增交班", type="primary", use_container_width=True, on_click=cb_add)
+    if st.session_state.add_error:
+        st.error("「姓名」與「內容」為必填！")
 
 with btn_col2:
-    if st.button("🔄 重新輸入", use_container_width=True):
-        clear_form()
-        st.rerun()
+    st.button("🔄 重新輸入", use_container_width=True, on_click=clear_form)
 
 # ================= 區塊 3：已登錄交班預覽 =================
 st.header("3. 已登錄交班事項")
@@ -189,16 +212,9 @@ if st.session_state.handovers:
             
             c_edit, c_del = st.columns([1, 1])
             with c_edit:
-                if st.button(f"✏️ 修改 {h['name']}", key=f"edit_{idx}"):
-                    load_form(h)
-                    st.session_state.handovers.pop(idx) # 載回輸入區並從暫存移除
-                    save_handovers(st.session_state.handovers)
-                    st.rerun()
+                st.button(f"✏️ 修改 {h['name']}", key=f"edit_{idx}", on_click=cb_edit, args=(idx, h))
             with c_del:
-                if st.button(f"🗑️ 刪除 {h['name']}", key=f"del_{idx}"):
-                    st.session_state.handovers.pop(idx)
-                    save_handovers(st.session_state.handovers)
-                    st.rerun()
+                st.button(f"🗑️ 刪除 {h['name']}", key=f"del_{idx}", on_click=cb_delete, args=(idx,))
 
 # ================= 核心工具函數 =================
 def get_unique_cells(row):
@@ -278,7 +294,6 @@ for h in sorted_h:
     doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else ""
     his_part = f"內外科病史:{h_his}" if h_his else ""
     
-    # 針對診斷未填寫防呆
     if not h_diag: h_diag = "??"
     diag_part = f"診斷:{h_diag}"
     
@@ -312,7 +327,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
             p.text = f"值班醫師： {selected_doc}"
     
     new_idx, out_idx = 0, 0
-    rows_to_delete = [] # 用來收集多餘的空白出入院病人列
+    rows_to_delete = [] 
     
     for table in doc.tables:
         fill_mode, name_col_idx = None, 0
@@ -341,7 +356,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
 
             if fill_mode and name_col_idx < len(u_cells):
                 c_name = re.sub(r'[\r\n\t\s_0]', '', u_cells[name_col_idx].text)
-                if c_name == "": # 空白資料列
+                if c_name == "": 
                     if fill_mode == "new":
                         if new_idx < len(p_new):
                             pd = p_new[new_idx]
@@ -349,7 +364,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                                 safe_fill_cell(u_cells[name_col_idx+k if k<6 else name_col_idx+k+1], pd[k], font_size=10)
                             new_idx += 1
                         else:
-                            rows_to_delete.append(row) # 該列沒用到，排程刪除
+                            rows_to_delete.append(row)
                     elif fill_mode == "out":
                         if out_idx < len(p_out):
                             pd = p_out[out_idx]
@@ -357,9 +372,8 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                                 safe_fill_cell(u_cells[name_col_idx+k], pd[k], font_size=10)
                             out_idx += 1
                         else:
-                            rows_to_delete.append(row) # 該列沒用到，排程刪除
+                            rows_to_delete.append(row)
 
-    # 執行刪除多餘的出入院空白列 (瘦身)
     for r in rows_to_delete:
         try:
             r._element.getparent().remove(r._element)
