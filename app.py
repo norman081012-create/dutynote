@@ -33,7 +33,7 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (標準流水帳 V3)")
+st.title("🏥 醫師病房值班日誌自動生成器 (終極格子填裝版)")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -138,11 +138,21 @@ def get_unique_cells(row):
         if cell not in unique_cells: unique_cells.append(cell)
     return unique_cells
 
-def safe_fill_cell(cell, text):
+def safe_fill_cell(cell, text, font_size=10):
+    """安全填入：清空格子，放入新字，鎖定字體與段落間距"""
     if text is None or text == "": return
     for p in cell.paragraphs: p.text = "" 
     run = (cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()).add_run(str(text))
-    run.font.size = Pt(10)
+    run.font.size = Pt(font_size)
+    run.bold = False
+    if cell.paragraphs:
+        cell.paragraphs[0].paragraph_format.space_before = Pt(0)
+        cell.paragraphs[0].paragraph_format.space_after = Pt(0)
+
+def text_chunker(text, max_len=42):
+    """【新引擎】將長字串依指定字數切分為陣列，用於逐列填入表格"""
+    if not text: return []
+    return [text[i:i+max_len] for i in range(0, len(text), max_len)]
 
 def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
     if not os.path.exists(TEMPLATE_PATH):
@@ -150,13 +160,13 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
     
     doc = Document(TEMPLATE_PATH)
     
-    # 民國年日期填寫
+    # --- 填寫日期 ---
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
         if "日期" in p.text.replace(" ", ""): p.text = date_str
     
-    # HIS表格填寫
+    # --- HIS表格填寫 ---
     new_idx, out_idx = 0, 0
     for table in doc.tables:
         fill_mode, name_col_idx = None, 0
@@ -197,6 +207,21 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                             safe_fill_cell(u_cells[name_col_idx+k], pd[k])
                         out_idx += 1
 
+    # --- 【精準刪除】危險評估表格最後一列 ---
+    for table in doc.tables:
+        is_risk_table = False
+        for i in range(min(3, len(table.rows))):
+            row_txt = "".join([c.text for c in get_unique_cells(table.rows[i])]).replace(" ", "")
+            if "危險評估" in row_txt or "自殺顧慮" in row_txt:
+                is_risk_table = True
+                break
+        
+        if is_risk_table and len(table.rows) > 3:
+            # 根本上刪除該表格的最後一列 (從 5 行空列變 4 行)
+            row_to_del = table.rows[-1]
+            row_to_del._element.getparent().remove(row_to_del._element)
+            break
+
     # --- 刪除「討論與講評：」表格防跑版 ---
     discuss_table_idx = -1
     for idx, table in enumerate(doc.tables):
@@ -211,22 +236,12 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         if p_before: p_before.insert_paragraph_before()
         table_to_del._element.getparent().remove(table_to_del._element)
 
-    # --- 刪除危險評估表格防跑版 ---
-    risk_table_idx = -1
-    for idx, table in enumerate(doc.tables):
-        first_row_txt = "".join([c.text for c in table.rows[0].cells]).replace(" ","")
-        if "危險評估" in first_row_txt:
-            risk_table_idx = idx
-            break
-            
-    if risk_table_idx != -1:
-        table_to_del = doc.tables[risk_table_idx]
-        table_to_del._element.getparent().remove(table_to_del._element)
 
-    # --- 填寫標準流水帳格式交班 ---
+    # --- 填寫流水帳交班 (格子切分法) ---
     sorted_h = sorted(handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
     
-    h_lines = []
+    all_chunks_to_fill = []
+    
     for h in sorted_h:
         h_loc = h.get('location', '病房')
         h_name = h.get('name', '')
@@ -239,48 +254,48 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         h_time = h.get('time_occurred', '')
         h_content = h.get('content', '').replace('\n', ' ')
 
-        # 格式化各區塊
+        # 格式化
         med_str = f"病歷號:{h_med} " if h_med else ""
         age_str = f"{h_age}歲" if h_age else ""
         gen_str = f"{h_gen}性" if h_gen else ""
         age_gen_combined = f" {age_str}{gen_str}" if (h_age or h_gen) else ""
-        
         ward_tag = f"({h_loc[0:2]})" if h_loc != "急診" and h_loc != "病房" else ""
         doc_str = f"{h_att}醫師{ward_tag}病人" if h_att else f"{ward_tag}病人"
-        
-        diag_str = f"，診斷{h_diag}" if h_diag else ""
+        diag_str = f"，診斷:{h_diag}" if h_diag else ""
         his_str = f"，內外科病史:{h_his}" if h_his else ""
         time_str = f" {h_time}時" if h_time else ""
 
-        line = f"({h_loc}){med_str}姓名:{h_name}{age_gen_combined}，{doc_str}{his_str}{diag_str}{time_str}，{h_content}\n"
-        h_lines.append(line)
-
-    final_h_text = "".join(h_lines)
-
-    # 寫入 Word，使用標準12pt字體且不加粗
-    inserted = False
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in get_unique_cells(row):
-                for p in cell.paragraphs:
-                    if "病房特殊狀況及處理" in p.text.replace(" ",""):
-                        run = p.add_run(final_h_text)
-                        run.font.size = Pt(12)
-                        run.bold = False
-                        p.paragraph_format.space_before = Pt(0)
-                        p.paragraph_format.space_after = Pt(0)
-                        inserted = True; break
-                if inserted: break
-            if inserted: break
-        if inserted: break
+        # 組合此病人的完整字串
+        line = f"({h_loc}){med_str}姓名:{h_name}{age_gen_combined}，{doc_str}{his_str}{diag_str}{time_str}，{h_content}"
         
-    if not inserted:
-        for p in doc.paragraphs:
-            if "病房特殊狀況及處理" in p.text.replace(" ",""):
-                run = p.add_run(final_h_text)
-                run.font.size = Pt(12)
-                run.bold = False
+        # 將字串切塊 (預設每 42 字切一塊，放入不同列)
+        chopped_lines = text_chunker(line, max_len=42)
+        all_chunks_to_fill.extend(chopped_lines)
+
+    # 尋找交班表格並逐列填入
+    target_table = None
+    start_row_idx = -1
+    
+    for table in doc.tables:
+        for idx, row in enumerate(table.rows):
+            if not row.cells: continue
+            if "病房特殊狀況及處理" in row.cells[0].text.replace(" ", ""):
+                target_table = table
+                start_row_idx = idx + 1 # 從標題的「下一列」開始填
                 break
+        if target_table: break
+
+    if target_table and start_row_idx != -1:
+        for i, chunk_text in enumerate(all_chunks_to_fill):
+            current_row_idx = start_row_idx + i
+            if current_row_idx < len(target_table.rows):
+                # 填入現有的空白列 (字體設為 12pt)
+                target_cell = target_table.rows[current_row_idx].cells[0]
+                safe_fill_cell(target_cell, chunk_text, font_size=12)
+            else:
+                # 萬一格子不夠用，自動新增一列
+                new_row = target_table.add_row()
+                safe_fill_cell(new_row.cells[0], chunk_text, font_size=12)
 
     stream = io.BytesIO(); doc.save(stream); stream.seek(0)
     return stream
@@ -289,8 +304,7 @@ st.header("4. 確認與輸出")
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
         f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
-        # 【修正】移除外部變數調用，改為靜態成功訊息
-        st.success("✅ 檔案已更新並備妥！(已自動精簡空白表格以防止跳頁)")
+        st.success("✅ 檔案已更新並備妥！(已啟動逐列填格子系統，並刪除一行危險評估)")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
