@@ -96,21 +96,35 @@ def parse_his_data(raw_text):
     return parsed_stations, parsed_new, parsed_out
 
 def parse_prn_data(raw_text):
-    """解析 PRN 藥物文字並按醫師分類"""
+    """解析 PRN 藥物文字並按醫師分類 (套用 > 4 個英文字母篩選邏輯)"""
     if not raw_text.strip(): return ""
     doc_map = {}
     for line in raw_text.splitlines():
         parts = [p.strip() for p in line.split('\t')]
         if len(parts) < 6: continue
-        name, att, med_full = parts[1], parts[3], parts[5]
-        # 藥名簡化：取第一個單字
-        med = med_full.split(' ')[0].split('(')[0].strip()
+        
+        name = parts[1]
+        att = parts[3]
+        med_full = parts[5] # 這是包含了藥物名稱的字串
+        
+        # 尋找第一組連續的英文字母
+        match = re.search(r'[A-Za-z]+', med_full)
+        if not match: continue # 如果沒有英文字母則跳過
+        
+        med = match.group(0)
+        
+        # 核心防呆：超過 4 個英文字母才抓 (完美過濾掉 "If BW > 4%" 的 "If")
+        if len(med) <= 4: continue
         
         if att not in doc_map: doc_map[att] = {}
         if name not in doc_map[att]: doc_map[att][name] = []
-        if med not in doc_map[att][name]: doc_map[att][name].append(med)
+        
+        # 避免同一個病人重複紀錄相同的藥物
+        if med not in doc_map[att][name]: 
+            doc_map[att][name].append(med)
     
     output_lines = []
+    # 依照 ATTENDING_DOCS_GLOBAL 的順序輸出
     for doc in ATTENDING_DOCS_GLOBAL:
         if doc and doc in doc_map:
             pt_list = []
@@ -533,7 +547,7 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
                 target_cell = get_unique_cells(target_table.rows[current_row_idx])[0]
                 safe_fill_cell(target_cell, chunk_text, font_size=12)
                 current_row_idx += 1
-            else: # 如果硬擠(動態擴展)，可能會擠壓後方版面，但先容許Word自動換頁
+            else: # 如果硬擠(動態擴展)
                 ref_row = target_table.rows[discuss_row_idx]
                 blank_tr = deepcopy(target_table.rows[discuss_row_idx - 1]._tr)
                 ref_row._tr.addprevious(blank_tr)
@@ -559,7 +573,7 @@ if st.button("🚀 生成下載 Word", type="primary"):
             st.session_state.f_duty_doc
         )
         if overflow:
-            st.error("⚠️ 交班內容過多（已超過 Word 表格行數），若版面跑位請考慮簡化內容。")
+            st.error("⚠️ 交班內容與 PRN 資料過多（已超過 Word 表格行數），若版面跑位請考慮簡化內容。")
         else:
             st.success("✅ 檔案已更新並備妥！")
             
