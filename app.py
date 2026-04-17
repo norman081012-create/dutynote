@@ -21,8 +21,13 @@ st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 TEMPLATE_PATH = "template.docx"
 DB_FILE = "handovers.json"
 
-ATTENDING_DOCS = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
-DIAG_CHOICES = ["", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
+# UI 專用的選項名單 (含「太忙了沒時間問」)
+ATTENDING_DOCS_GLOBAL = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
+ATTENDING_DOCS_FORM = ["太忙了沒時間問", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
+DIAG_CHOICES_FORM = ["太忙了沒時間問", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
+
+# 年齡選單 (往上 49~1，往下 50~110)
+age_options = [str(i) for i in range(1, 50)] + ["太忙了沒時間問"] + [str(i) for i in range(50, 111)]
 
 # --- CSS 樣式注入 (輸入框置中) ---
 st.markdown("""
@@ -64,25 +69,20 @@ if "f_duty_doc" not in st.session_state:
     
 if "f_loc" not in st.session_state:
     st.session_state.update({
-        "f_loc": "病房", "f_name": "", "f_age": "", "f_gen": "",
+        "f_loc": "病房", "f_name": "", "f_age": "太忙了沒時間問", "f_gen": "",
         "f_med": "", "f_hist": "", "f_time": now_tw.time(),
-        "f_doc": "", "f_diag_c": "", "f_diag_m": "", "f_content": "",
+        "f_doc": "太忙了沒時間問", "f_diag_c": "太忙了沒時間問", "f_diag_m": "", "f_content": "",
         "f_special": False, "add_error": False
     })
 
-# --- 年齡選單 (往上 49~1，往下 50~110) ---
-age_options = [str(i) for i in range(1, 50)] + [""] + [str(i) for i in range(50, 111)]
-default_age_idx = age_options.index("")
-
-# --- 全新智慧排序邏輯 (優先級距 + 時間跨度) ---
+# --- 全新智慧排序邏輯 ---
 def get_sort_key(h):
     loc = h.get('location', '')
     is_special = h.get('is_special', False)
 
-    # 1. 單位與特別交班排序優先度
     if loc == "急診" and is_special: p_loc = 1
     elif loc == "急診" and not is_special: p_loc = 2
-    elif is_special: p_loc = 3 # 其他單位的特別交班
+    elif is_special: p_loc = 3 
     elif loc == "病房": p_loc = 4
     elif loc == "二樓病房": p_loc = 5
     elif loc == "三樓病房": p_loc = 6
@@ -90,7 +90,6 @@ def get_sort_key(h):
     elif loc == "五樓病房": p_loc = 8
     else: p_loc = 9
 
-    # 2. 時間區塊排序 (08:00~23:59 優先，00:00~07:59 在後)
     t_str = h.get('time_occurred', '00:00')
     try:
         hrs, mins = map(int, t_str.split(':'))
@@ -98,10 +97,8 @@ def get_sort_key(h):
     except:
         total_mins = 0
 
-    if 480 <= total_mins <= 1439: # 08:00 - 23:59
-        p_time_block = 1
-    else:                         # 00:00 - 07:59
-        p_time_block = 2
+    if 480 <= total_mins <= 1439: p_time_block = 1
+    else: p_time_block = 2
 
     return (p_loc, p_time_block, total_mins)
 
@@ -109,13 +106,13 @@ def get_sort_key(h):
 def clear_form():
     st.session_state.f_loc = "病房"
     st.session_state.f_name = ""
-    st.session_state.f_age = ""
+    st.session_state.f_age = "太忙了沒時間問"
     st.session_state.f_gen = ""
     st.session_state.f_med = ""
     st.session_state.f_hist = ""
     st.session_state.f_time = datetime.datetime.now(tw_tz).time()
-    st.session_state.f_doc = ""
-    st.session_state.f_diag_c = ""
+    st.session_state.f_doc = "太忙了沒時間問"
+    st.session_state.f_diag_c = "太忙了沒時間問"
     st.session_state.f_diag_m = ""
     st.session_state.f_content = ""
     st.session_state.f_special = False
@@ -124,7 +121,10 @@ def clear_form():
 def load_form(h):
     st.session_state.f_loc = h.get("location", "病房")
     st.session_state.f_name = h.get("name", "")
-    st.session_state.f_age = h.get("age", "")
+    
+    age = h.get("age", "")
+    st.session_state.f_age = "太忙了沒時間問" if age == "" else age
+    
     st.session_state.f_gen = h.get("gender", "")
     st.session_state.f_med = h.get("med_record", "")
     st.session_state.f_hist = h.get("history", "")
@@ -132,14 +132,21 @@ def load_form(h):
         st.session_state.f_time = datetime.datetime.strptime(h.get("time_occurred", "00:00"), "%H:%M").time()
     except:
         st.session_state.f_time = datetime.datetime.now(tw_tz).time()
-    st.session_state.f_doc = h.get("attending_doc", "")
+        
+    doc = h.get("attending_doc", "")
+    st.session_state.f_doc = "太忙了沒時間問" if doc == "" else doc
+    
     diag = h.get("diagnosis", "")
-    if diag in DIAG_CHOICES:
+    if diag in ["Schizophrenia", "bipolar", "depression"]:
         st.session_state.f_diag_c = diag
+        st.session_state.f_diag_m = ""
+    elif diag == "":
+        st.session_state.f_diag_c = "太忙了沒時間問"
         st.session_state.f_diag_m = ""
     else:
         st.session_state.f_diag_c = "其他 (請於下方輸入)"
         st.session_state.f_diag_m = diag
+        
     st.session_state.f_content = h.get("content", "")
     st.session_state.f_special = h.get("is_special", False)
 
@@ -156,11 +163,18 @@ def cb_add():
         st.session_state.add_error = True
     else:
         st.session_state.add_error = False
-        diag_final = st.session_state.f_diag_m if not st.session_state.f_diag_c or st.session_state.f_diag_c == "其他 (請於下方輸入)" else st.session_state.f_diag_c
+        
+        # 將 UI 的選項轉回真實資料
+        diag_c_val = "" if st.session_state.f_diag_c == "太忙了沒時間問" else st.session_state.f_diag_c
+        diag_final = st.session_state.f_diag_m if not diag_c_val or diag_c_val == "其他 (請於下方輸入)" else diag_c_val
+        
+        age_val = "" if st.session_state.f_age == "太忙了沒時間問" else st.session_state.f_age
+        doc_val = "" if st.session_state.f_doc == "太忙了沒時間問" else st.session_state.f_doc
+
         st.session_state.handovers.append({
             "location": st.session_state.f_loc, "name": st.session_state.f_name, 
-            "age": st.session_state.f_age, "gender": st.session_state.f_gen,
-            "med_record": st.session_state.f_med, "attending_doc": st.session_state.f_doc,
+            "age": age_val, "gender": st.session_state.f_gen,
+            "med_record": st.session_state.f_med, "attending_doc": doc_val,
             "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
             "diagnosis": diag_final, "history": st.session_state.f_hist,
             "is_er": (st.session_state.f_loc == "急診"),
@@ -182,6 +196,9 @@ def cb_delete(idx):
 
 st.title("🏥 醫師病房值班日誌自動生成器")
 
+# 【移至標題下方】溫馨提示
+st.warning("⚠️ **溫馨提示：** 新值班醫師接班時，請務必點擊畫面上方的「🔄 刷新並清空所有資料」，否則將會讀取到前一位醫師的設定檔與暫存資料喔！")
+
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
 with col_btn:
@@ -192,7 +209,7 @@ col_date, col_text = st.columns([2, 8])
 
 with col_date:
     st.date_input("📅 選擇值班日期", key="f_duty_date")
-    st.selectbox("👨‍⚕️ 選擇值班醫師", ATTENDING_DOCS, key="f_duty_doc")
+    st.selectbox("👨‍⚕️ 選擇值班醫師", ATTENDING_DOCS_GLOBAL, key="f_duty_doc")
 
 def parse_his_data(raw_text):
     parsed_stations = {}
@@ -234,17 +251,16 @@ c1, c2 = st.columns(2)
 with c1:
     st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"], key="f_loc")
     st.text_input("病人姓名 (必填)", key="f_name")
-    st.selectbox("年紀", age_options, index=default_age_idx, key="f_age")
+    st.selectbox("年紀", age_options, key="f_age")
     st.selectbox("性別", ["", "男", "女"], key="f_gen")
     st.text_input("病歷號", key="f_med")
     st.text_area("內外科病史輸入", height=60, key="f_hist")
     
 with c2:
     st.time_input("狀況發生時間", key="f_time")
-    st.selectbox("主治醫師", ATTENDING_DOCS, key="f_doc")
-    st.selectbox("診斷快速選項", DIAG_CHOICES, key="f_diag_c")
+    st.selectbox("主治醫師", ATTENDING_DOCS_FORM, key="f_doc")
+    st.selectbox("診斷快速選項", DIAG_CHOICES_FORM, key="f_diag_c")
     st.text_input("手動輸入診斷 (若選其他)", key="f_diag_m")
-    # 新增特別交班勾選框
     st.checkbox("🚨 特別交班", key="f_special")
     
 st.text_area("交班內容 (必填)", key="f_content")
@@ -261,7 +277,6 @@ with btn_col2:
 # ================= 區塊 3：已登錄交班預覽 =================
 st.header("3. 已登錄交班事項")
 if st.session_state.handovers:
-    # 應用全新的 get_sort_key 進行排序
     sorted_view = sorted(st.session_state.handovers, key=get_sort_key)
     for h in sorted_view:
         idx = st.session_state.handovers.index(h)
@@ -287,7 +302,6 @@ def get_unique_cells(row):
         if cell not in unique_cells: unique_cells.append(cell)
     return unique_cells
 
-# 修改：加入 align 參數，預設靠左
 def safe_fill_cell(cell, text, font_size=12, align=WD_ALIGN_PARAGRAPH.LEFT):
     if text is None: text = ""
     for p in cell.paragraphs: p.text = "" 
@@ -333,7 +347,6 @@ def visual_smart_chunker(text, max_visual_width=78):
 st.header("4. 預覽與輸出")
 
 preview_lines = []
-# 預覽字串同樣套用全新排序
 sorted_h = sorted(st.session_state.handovers, key=get_sort_key)
 
 for h in sorted_h:
@@ -386,21 +399,31 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
     
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
+    
     for p in doc.paragraphs:
         txt = p.text.replace(" ", "")
-        if "日期" in txt: p.text = date_str
-        if "值班醫師" in txt:
-            p.text = f"值班醫師： {selected_doc}" if selected_doc else p.text
+        if "日期" in txt: 
+            p.text = date_str
+        elif "值班醫師" in txt:
+            # 強制清空並重新套用專屬字體，完美呈現醫師簽名
+            p.text = "" 
+            run_label = p.add_run("值班醫師：")
+            run_label.font.size = Pt(16)
+            run_label.bold = True
+            run_label.font.name = '標楷體'
+            rPr_label = run_label._element.get_or_add_rPr()
+            rPr_label.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
+
+            if selected_doc:
+                run_name = p.add_run(f"  {selected_doc}")
+                run_name.font.size = Pt(16)
+                run_name.bold = True
+                run_name.font.name = '標楷體'
+                rPr_name = run_name._element.get_or_add_rPr()
+                rPr_name.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
+                
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            for run in p.runs:
-                run.font.size = Pt(16)
-                run.bold = True
-                run.font.name = '標楷體'
-                rPr = run._element.get_or_add_rPr()
-                rFonts = rPr.get_or_add_rFonts()
-                rFonts.set(qn('w:eastAsia'), '標楷體')
     
-    # HIS 護理站填寫 (強制置中對齊 WD_ALIGN_PARAGRAPH.CENTER)
     for table in doc.tables:
         for row in table.rows:
             u_cells = get_unique_cells(row)
@@ -413,7 +436,6 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date, sele
                     clean_cell = re.sub(r'[\r\n\t]', '', c.text.replace(" ", "").replace("　", ""))
                     if matched_st in clean_cell:
                         if idx+3 < len(u_cells):
-                            # 套用置中對齊
                             safe_fill_cell(u_cells[idx+1], p_stations[matched_st][0], font_size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
                             safe_fill_cell(u_cells[idx+2], p_stations[matched_st][1], font_size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
                             safe_fill_cell(u_cells[idx+3], p_stations[matched_st][2], font_size=10, align=WD_ALIGN_PARAGRAPH.CENTER)
@@ -554,6 +576,3 @@ if st.button("🚀 生成下載 Word", type="primary"):
         st.download_button("📥 點擊下載", f, f"值班日誌_{st.session_state.f_duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
-
-st.markdown("---")
-st.warning("⚠️ **溫馨提示：** 新值班醫師接班時，請務必點擊畫面上方的「🔄 刷新並清空所有資料」，否則將會讀取到前一位醫師的設定檔與暫存資料喔！")
