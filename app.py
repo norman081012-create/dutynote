@@ -11,7 +11,7 @@ import re
 import datetime
 from datetime import timezone, timedelta
 
-# 設定台灣時區 (UTC+8)，解決雲端伺服器時間誤差問題
+# 設定台灣時區 (UTC+8)
 tw_tz = timezone(timedelta(hours=8))
 
 st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
@@ -19,7 +19,8 @@ st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 TEMPLATE_PATH = "template.docx"
 DB_FILE = "handovers.json"
 
-ATTENDING_DOCS = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村"]
+# 【修改點 3】名單最下方新增 唐銘駿、吳騂、張維紘
+ATTENDING_DOCS = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
 DIAG_CHOICES = ["", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
 
 def load_handovers():
@@ -38,7 +39,6 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-# 【修改點 3】移除 "(預覽與防呆 V11)"
 st.title("🏥 醫師病房值班日誌自動生成器")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
@@ -57,8 +57,9 @@ col_date, col_text = st.columns([2, 8])
 now_tw = datetime.datetime.now(tw_tz)
 
 with col_date:
-    # 【修改點 1】使用台灣時間的日期
     duty_date = st.date_input("📅 選擇值班日期", now_tw.date())
+    # 【修改點 3】在日期下方新增選擇值班醫師
+    duty_doc = st.selectbox("👨‍⚕️ 選擇值班醫師", ATTENDING_DOCS)
 
 def parse_his_data(raw_text):
     parsed_stations = {}
@@ -94,7 +95,6 @@ with col_text:
     parsed_stations, parsed_new, parsed_out = parse_his_data(raw_text_input)
 
 # ================= 區塊 2：交班事項登錄表單 =================
-# 【修改點 3】移除 "(完美流水帳格式)"
 st.header("2. 交班事項登錄")
 with st.form("handover_form", clear_on_submit=True):
     c1, c2 = st.columns(2)
@@ -107,7 +107,6 @@ with st.form("handover_form", clear_on_submit=True):
         history_input = st.text_area("內外科病史輸入", height=60)
         
     with c2:
-        # 【修改點 1】使用台灣時間的時間
         time_occurred = st.time_input("狀況發生時間", value=now_tw.time())
         attending_doc = st.selectbox("主治醫師", ATTENDING_DOCS)
         diag_choice = st.selectbox("診斷快速選項", DIAG_CHOICES)
@@ -223,12 +222,13 @@ for h in sorted_h:
     
     ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
     
-    # 【修改點 2】解決未填入醫師會殘留病人的問題：如果沒有主治醫師，則該段直接留白
     doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else ""
     
     his_part = f"內外科病史:{h_his}" if h_his else ""
     diag_part = f"診斷:{h_diag}" if h_diag else ""
-    time_part = f"{h_time}時" if h_time else ""
+    
+    # 【修改點 2】改為「約XXX時」
+    time_part = f"約{h_time}時" if h_time else ""
     
     diag_time = ""
     if diag_part and time_part: diag_time = f"{diag_part} {time_part}"
@@ -243,20 +243,23 @@ for h in sorted_h:
 # 顯示網頁預覽區
 if preview_lines:
     with st.expander("👀 點擊展開：最終交班文字預覽 (與 Word 輸出內容相同)", expanded=True):
-        st.info("💡 提示：因雲端伺服器未安裝微軟 Word，無法直接預覽 PDF。請確認下方文字與排版無誤後，下載 Word 檔再自行另存為 PDF。")
+        # 【修改點 1】已刪除 PDF 轉換提示
         preview_text = "\n\n".join(preview_lines) 
         st.text_area("即將寫入 Word 的文字：", value=preview_text, height=250, disabled=True)
 
 # --- 2. 生成 Word 檔案 ---
-def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
+def build_word_document(p_stations, p_new, p_out, handovers, selected_date, selected_doc):
     if not os.path.exists(TEMPLATE_PATH): raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。")
     doc = Document(TEMPLATE_PATH)
     
-    # 填寫日期
+    # 填寫日期 (與值班醫師)
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     for p in doc.paragraphs:
         if "日期" in p.text.replace(" ", ""): p.text = date_str
+        # 預留：若您的 Word 模板中有「值班醫師：」的欄位，會自動填入
+        if "值班醫師" in p.text.replace(" ", "") and selected_doc: 
+            p.text = f"值班醫師： {selected_doc}"
     
     # HIS表格填寫
     new_idx, out_idx = 0, 0
@@ -363,8 +366,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
 
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
-        f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
-        # 【修改點 3】移除後方贅字
+        f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date, duty_doc)
         st.success("✅ 檔案已更新並備妥！")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
