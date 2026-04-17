@@ -3,6 +3,7 @@ from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from copy import deepcopy
+import unicodedata  # 核心升級：用於判斷字元的全形/半形視覺寬度
 import io
 import json
 import os
@@ -14,9 +15,7 @@ st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 TEMPLATE_PATH = "template.docx"
 DB_FILE = "handovers.json"
 
-# 固定主治醫師全名清單
 ATTENDING_DOCS = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村"]
-# 診斷快速選項
 DIAG_CHOICES = ["", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
 
 def load_handovers():
@@ -35,7 +34,7 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (智慧斷行 V9)")
+st.title("🏥 醫師病房值班日誌自動生成器 (視覺換行 V10)")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -141,40 +140,52 @@ def get_unique_cells(row):
     return unique_cells
 
 def safe_fill_cell(cell, text, font_size=12):
-    """【強制覆寫格式】：清空隱藏的首行縮排、置中，保證絕對貼齊邊界"""
     if text is None: text = ""
     for p in cell.paragraphs: p.text = "" 
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     run = p.add_run(str(text).strip())
     run.font.size = Pt(font_size)
     run.bold = False
-    
-    # 暴力破解原廠樣板的詭異排版，強制靠左且去除所有縮排
     p.alignment = WD_ALIGN_PARAGRAPH.LEFT
     p.paragraph_format.left_indent = Pt(0)
     p.paragraph_format.first_line_indent = Pt(0)
     p.paragraph_format.space_before = Pt(0)
     p.paragraph_format.space_after = Pt(0)
 
-def smart_chunker(text, max_len=38):
+def get_text_width(text):
+    """計算字串的視覺寬度：全形/中文算2，半形/英文數字算1"""
+    width = 0
+    for char in text:
+        if unicodedata.east_asian_width(char) in ('F', 'W', 'A'):
+            width += 2
+        else:
+            width += 1
+    return width
+
+def visual_smart_chunker(text, max_visual_width=78):
     """
-    【智慧斷行引擎】：保留完整的英文單字/數字
-    不會把 Schizophrenia 從中間切斷，若塞不下會整塊移到下一列。
-    max_len 設為 38，專門對應 12pt 字體在 A4 寬度的極限。
+    【核心：視覺寬度斷行引擎】
+    依照 A4 紙張與 12pt 字體的極限，預設每行總寬度為 78 (約 39 個中文字)。
+    遇到滿格時，自動將下一個完整的詞移至下一列。
     """
     if not text: return []
-    # 利用正規表示式將文字拆成：完整的英文/數字詞彙，或是單一中文字/符號
+    # 切割為英文單字/數字塊，或獨立的中文字元/符號
     tokens = re.findall(r'[a-zA-Z0-9.\-\_]+|.', text)
     chunks = []
     current_chunk = ""
+    current_width = 0
     
     for token in tokens:
-        if len(current_chunk) + len(token) <= max_len:
-            current_chunk += token
-        else:
+        token_width = get_text_width(token)
+        # 如果加上這個詞會超出版面，就把目前的行存起來，換下一行
+        if current_width + token_width > max_visual_width:
             if current_chunk:
                 chunks.append(current_chunk.strip())
-            current_chunk = token.lstrip() # 去除開頭空白
+            current_chunk = token.lstrip()
+            current_width = get_text_width(current_chunk)
+        else:
+            current_chunk += token
+            current_width += token_width
             
     if current_chunk:
         chunks.append(current_chunk.strip())
@@ -234,7 +245,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                             safe_fill_cell(u_cells[name_col_idx+k], pd[k], font_size=10)
                         out_idx += 1
 
-    # --- 危險評估表格：鎖定標題列，往下只留 4 列空白 ---
+    # --- 危險評估瘦身：保留 4 列 ---
     for table in doc.tables:
         header_row_idx = -1
         for i, row in enumerate(table.rows):
@@ -250,11 +261,10 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                 row_to_del._element.getparent().remove(row_to_del._element)
             break
 
-    # --- 填寫流水帳交班 ---
+    # --- 填寫交班與視覺斷行 ---
     sorted_h = sorted(handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
     
     all_chunks_to_fill = []
-    
     for i, h in enumerate(sorted_h):
         h_loc = h.get('location', '病房')
         h_name = h.get('name', '').strip()
@@ -265,10 +275,8 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         h_diag = h.get('diagnosis', '').strip()
         h_his = h.get('history', '').strip()
         h_time = h.get('time_occurred', '').strip()
-        # 清除手動換行
         h_content = h.get('content', '').replace('\n', ' ').strip()
 
-        # 組裝文字，嚴格控制空白
         med_part = f"病歷號:{h_med} " if h_med else ""
         age_gen_part = f"，{h_age}歲{h_gen}性" if (h_age or h_gen) else ""
         pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
@@ -288,18 +296,17 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
             
         components = [pt_part, doc_part, his_part, diag_time, h_content]
         components = [c for c in components if c.strip()]
-        
         full_line = "，".join(components)
         
-        # 啟動智慧斷行引擎 (設定每行最高 38 字以符合 12pt 的寬度)
-        chunks = smart_chunker(full_line, max_len=38)
+        # 啟動視覺寬度斷行引擎
+        chunks = visual_smart_chunker(full_line, max_visual_width=78)
         all_chunks_to_fill.extend(chunks)
         
         # 病人間空一列
         if i < len(sorted_h) - 1:
             all_chunks_to_fill.append("")
 
-    # --- 尋找交班表格並逐列填入 ---
+    # --- 逐列填入表格 ---
     target_table = None
     start_row_idx = -1
     discuss_row_idx = -1
@@ -319,26 +326,21 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
 
     if target_table and start_row_idx != -1 and discuss_row_idx != -1:
         current_row_idx = start_row_idx
-        
         for chunk_text in all_chunks_to_fill:
             if current_row_idx < discuss_row_idx:
-                # 填寫並將字體設定為與標題相仿的 12pt
                 target_cell = get_unique_cells(target_table.rows[current_row_idx])[0]
                 safe_fill_cell(target_cell, chunk_text, font_size=12)
                 current_row_idx += 1
             else:
-                # 空間不夠，複製一行
                 ref_row = target_table.rows[discuss_row_idx]
                 blank_tr = deepcopy(target_table.rows[discuss_row_idx - 1]._tr)
                 ref_row._tr.addprevious(blank_tr)
-                
                 discuss_row_idx += 1
                 
                 target_cell = get_unique_cells(target_table.rows[current_row_idx])[0]
                 safe_fill_cell(target_cell, chunk_text, font_size=12)
                 current_row_idx += 1
                 
-        # 清除沒填滿的格子殘留格式
         while current_row_idx < discuss_row_idx:
             target_cell = get_unique_cells(target_table.rows[current_row_idx])[0]
             safe_fill_cell(target_cell, "", font_size=12)
@@ -351,7 +353,7 @@ st.header("4. 確認與輸出")
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
         f = build_word_document(parsed_stations, parsed_new, parsed_out, st.session_state.handovers, duty_date)
-        st.success("✅ 檔案已更新並備妥！(已啟動智慧斷行與格式強制覆寫，保證完美貼齊)")
+        st.success("✅ 檔案已更新並備妥！(視覺寬度引擎啟動，精準對齊不破字)")
         st.download_button("📥 點擊下載", f, f"值班日誌_{duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
