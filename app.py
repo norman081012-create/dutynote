@@ -82,7 +82,6 @@ st.header("2. 交班事項登錄")
 with st.form("handover_form", clear_on_submit=True):
     c1, c2 = st.columns(2)
     with c1:
-        # 1. 刪除一列後重整，新增預設病房選項
         location = st.selectbox("單位/病房", ["新病房選項", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"])
         name = st.text_input("病人姓名 (必填)")
         age = st.text_input("年紀")
@@ -90,11 +89,8 @@ with st.form("handover_form", clear_on_submit=True):
         med_record = st.text_input("病歷號")
         
     with c2:
-        # 2. 狀況發生時間預設抓取當時時間
         time_occurred = st.time_input("狀況發生時間", value=datetime.datetime.now().time())
-        # 3. 主治醫師全名
         attending_doc = st.selectbox("主治醫師", ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村"])
-        # 4. 診斷選項與病史
         diag_choice = st.selectbox("診斷快速選項", ["", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"])
         diag_manual = st.text_input("手動輸入診斷 (若選其他)")
         history_input = st.text_area("病史輸入")
@@ -192,9 +188,10 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                             safe_fill_cell(u_cells[name_col_idx+k], pd[k])
                         out_idx += 1
 
-    # --- 填寫流水帳格式交班 ---
+    # --- 填寫流水帳格式交班 (【核心修復】防跳頁精準組裝) ---
     sorted_h = sorted(handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
-    h_text = "\n"
+    
+    h_lines = []
     for h in sorted_h:
         h_loc = h.get('location', '')
         h_name = h.get('name', '')
@@ -205,6 +202,7 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         h_diag = h.get('diagnosis', '')
         h_his = h.get('history', '')
         h_time = h.get('time_occurred', '')
+        # 將內容中的換行取代為空白，強迫不換段
         h_content = h.get('content', '').replace('\n', ' ')
 
         age_gen_str = f" {h_age}歲{h_gen}性" if (h_age or h_gen) else ""
@@ -215,21 +213,36 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         time_str = f" {h_time}時" if h_time else ""
         his_str = f"，{h_his}" if h_his else ""
 
-        # 最終格式組裝
-        line = f"({h_loc})病歷號:{h_name}{age_gen_str}，{doc_str}{his_str}{diag_str}{med_str}{time_str} ，{h_content}\n"
-        h_text += line
+        # 單筆資料，結尾「絕對不加 \n」
+        line = f"({h_loc})病歷號:{h_name}{age_gen_str}，{doc_str}{his_str}{diag_str}{med_str}{time_str} ，{h_content}"
+        h_lines.append(line)
+
+    # 用 \n 把陣列串起來。這樣最後一筆的尾巴就不會有多餘的空白行！
+    final_h_text = ""
+    if h_lines:
+        final_h_text = "\n" + "\n".join(h_lines)
 
     # 寫入 Word
-    inserted = False
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in get_unique_cells(row):
-                for p in cell.paragraphs:
-                    if "病房特殊狀況及處理" in p.text.replace(" ",""):
-                        run = p.add_run(h_text); run.font.size = Pt(10); inserted = True; break
+    if final_h_text:
+        inserted = False
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in get_unique_cells(row):
+                    for p in cell.paragraphs:
+                        if "病房特殊狀況及處理" in p.text.replace(" ",""):
+                            run = p.add_run(final_h_text)
+                            run.font.size = Pt(10)
+                            inserted = True; break
+                    if inserted: break
                 if inserted: break
             if inserted: break
-        if inserted: break
+            
+        if not inserted:
+            for p in doc.paragraphs:
+                if "病房特殊狀況及處理" in p.text.replace(" ",""):
+                    run = p.add_run(final_h_text)
+                    run.font.size = Pt(10)
+                    break
 
     stream = io.BytesIO(); doc.save(stream); stream.seek(0)
     return stream
