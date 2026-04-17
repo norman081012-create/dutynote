@@ -28,7 +28,7 @@ if 'handovers' not in st.session_state:
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 
-st.title("🏥 醫師病房值班日誌自動生成器 (標準格式 V2)")
+st.title("🏥 醫師病房值班日誌自動生成器 (精準格式版)")
 
 # ================= 區塊 1：全局控制與資料輸入 =================
 col_title, col_btn = st.columns([8, 2])
@@ -82,26 +82,27 @@ st.header("2. 交班事項登錄")
 with st.form("handover_form", clear_on_submit=True):
     c1, c2 = st.columns(2)
     with c1:
-        location = st.selectbox("單位/病房", ["新病房選項", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"])
+        # 新增「病房」為第一選項
+        location = st.selectbox("單位/病房", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"])
         name = st.text_input("病人姓名 (必填)")
         age = st.text_input("年紀")
         gender = st.selectbox("性別", ["", "男", "女"])
         med_record = st.text_input("病歷號")
+        history_input = st.text_area("內外科病史輸入")
         
     with c2:
         time_occurred = st.time_input("狀況發生時間", value=datetime.datetime.now().time())
         attending_doc = st.selectbox("主治醫師", ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村"])
         diag_choice = st.selectbox("診斷快速選項", ["", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"])
-        diag_manual = st.text_input("手動輸入診斷 (若選其他)")
-        history_input = st.text_area("病史輸入")
-        
-    content = st.text_area("交班內容 (必填)")
+        diag_manual = st.text_input("手動輸入診斷 (若快速選項留空或選其他)")
+        content = st.text_area("交班內容 (必填)", height=110)
     
     if st.form_submit_button("確認新增交班"):
         if not name or not content:
             st.error("「姓名」與「內容」為必填！")
         else:
-            diag_final = diag_manual if diag_choice == "其他 (請於下方輸入)" else diag_choice
+            # 判斷診斷欄位：快速選項若空或選其他，就吃手動輸入的值
+            diag_final = diag_manual if not diag_choice or diag_choice == "其他 (請於下方輸入)" else diag_choice
             st.session_state.handovers.append({
                 "location": location, "name": name, "age": age, "gender": gender,
                 "med_record": med_record, "attending_doc": attending_doc,
@@ -118,7 +119,7 @@ if st.session_state.handovers:
     for h in sorted_view:
         idx = st.session_state.handovers.index(h)
         with st.expander(f"[{h['location']}] {h['name']} - {h['time_occurred']}"):
-            st.write(f"主治：{h['attending_doc']} | 診斷：{h['diagnosis']}")
+            st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h['diagnosis']}")
             st.write(f"內容：{h['content']}")
             if st.button(f"刪除 {h['name']}", key=f"del_{idx}"):
                 st.session_state.handovers.pop(idx)
@@ -136,7 +137,7 @@ def safe_fill_cell(cell, text):
     if text is None or text == "": return
     for p in cell.paragraphs: p.text = "" 
     run = (cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()).add_run(str(text))
-    run.font.size = Pt(10)
+    run.font.size = Pt(10) # 鎖死儲存格文字為 10pt 防止撐大表格
 
 def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
     doc = Document(TEMPLATE_PATH)
@@ -188,7 +189,20 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                             safe_fill_cell(u_cells[name_col_idx+k], pd[k])
                         out_idx += 1
 
-    # --- 填寫流水帳格式交班 (【核心修復】防跳頁精準組裝) ---
+    # --- 刪除危險評估的一列防跳頁 ---
+    for table in doc.tables:
+        is_risk_table = False
+        for i in range(min(2, len(table.rows))):
+            row_txt = "".join([c.text for c in get_unique_cells(table.rows[i])]).replace(" ", "")
+            if "危險評估" in row_txt or "自殺顧慮" in row_txt:
+                is_risk_table = True; break
+        
+        if is_risk_table and len(table.rows) > 3:
+            row_to_delete = table.rows[-1]
+            row_to_delete._element.getparent().remove(row_to_delete._element)
+            break
+
+    # --- 填寫流水帳格式交班 ---
     sorted_h = sorted(handovers, key=lambda x: (x.get('location') != '急診', x.get('time_occurred')))
     
     h_lines = []
@@ -202,27 +216,33 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
         h_diag = h.get('diagnosis', '')
         h_his = h.get('history', '')
         h_time = h.get('time_occurred', '')
-        # 將內容中的換行取代為空白，強迫不換段
+        # 將內容中的換行取代為空白，強迫一氣呵成不換段
         h_content = h.get('content', '').replace('\n', ' ')
 
-        age_gen_str = f" {h_age}歲{h_gen}性" if (h_age or h_gen) else ""
-        ward_tag = f"({h_loc[0:2]})" if h_loc != "急診" else ""
+        # 格式化各區塊 (若空則完美隱藏)
+        med_str = f"病歷號:{h_med} " if h_med else ""
+        age_str = f"{h_age}歲" if h_age else ""
+        gen_str = f"{h_gen}性" if h_gen else ""
+        age_gen_combined = f" {age_str}{gen_str}" if (h_age or h_gen) else ""
+        
+        ward_tag = f"({h_loc})" if h_loc and h_loc != "急診" else ""
         doc_str = f"{h_att}醫師{ward_tag}病人" if h_att else f"{ward_tag}病人"
-        diag_str = f"，診斷{h_diag}" if h_diag else ""
-        med_str = f"，病歷號: {h_med}" if h_med else ""
-        time_str = f" {h_time}時" if h_time else ""
-        his_str = f"，{h_his}" if h_his else ""
+        
+        diag_str = f"，診斷:{h_diag}" if h_diag else ""
+        his_str = f"，內外科病史:{h_his}" if h_his else ""
+        time_str = f"，大約{h_time}時" if h_time else ""
 
-        # 單筆資料，結尾「絕對不加 \n」
-        line = f"({h_loc})病歷號:{h_name}{age_gen_str}，{doc_str}{his_str}{diag_str}{med_str}{time_str} ，{h_content}"
+        # 最終完整字串組裝
+        line = f"({h_loc}){med_str}姓名:{h_name}{age_gen_combined}，{doc_str}{his_str}{diag_str}{time_str}，{h_content}"
         h_lines.append(line)
 
-    # 用 \n 把陣列串起來。這樣最後一筆的尾巴就不會有多餘的空白行！
+    # 在所有交班資料最前方加上一個換行符號
+    # 這樣交班內容就會直接被推到「病房特殊狀況及處理：」的【下一行】，絕對不會打在一起
     final_h_text = ""
     if h_lines:
         final_h_text = "\n" + "\n".join(h_lines)
 
-    # 寫入 Word
+    # 寫入 Word，並設定字體為 12pt (與一般行高相符)且取消粗體
     if final_h_text:
         inserted = False
         for table in doc.tables:
@@ -231,7 +251,8 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
                     for p in cell.paragraphs:
                         if "病房特殊狀況及處理" in p.text.replace(" ",""):
                             run = p.add_run(final_h_text)
-                            run.font.size = Pt(10)
+                            run.font.size = Pt(12)  # 將字體放大至12pt
+                            run.bold = False        # 取消粗體，確保乾淨
                             inserted = True; break
                     if inserted: break
                 if inserted: break
@@ -241,7 +262,8 @@ def build_word_document(p_stations, p_new, p_out, handovers, selected_date):
             for p in doc.paragraphs:
                 if "病房特殊狀況及處理" in p.text.replace(" ",""):
                     run = p.add_run(final_h_text)
-                    run.font.size = Pt(10)
+                    run.font.size = Pt(12)
+                    run.bold = False
                     break
 
     stream = io.BytesIO(); doc.save(stream); stream.seek(0)
