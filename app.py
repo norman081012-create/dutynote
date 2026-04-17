@@ -98,14 +98,13 @@ st.header("2. 交班事項登錄")
 with st.form("handover_form", clear_on_submit=True):
     c1, c2, c3 = st.columns(3)
     with c1:
-        # 【修改點】將 checkbox 改為下拉選單
         location = st.selectbox("單位/病房", ["急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"])
         name = st.text_input("病人姓名 (必填)")
         age = st.text_input("年紀")
     with c2:
         gender = st.selectbox("性別", ["", "男", "女"])
         med_record = st.text_input("病歷號")
-        time_occurred = st.time_input("狀況發生時間", value=None) # 預設無時間
+        time_occurred = st.time_input("狀況發生時間", value=None)
     with c3:
         attending_doc = st.selectbox("主治醫師", ["", "鍾", "張", "劉", "謝", "成"])
         diagnosis = st.text_input("診斷")
@@ -121,7 +120,6 @@ with st.form("handover_form", clear_on_submit=True):
                 "gender": gender, "med_record": med_record,
                 "attending_doc": attending_doc, "diagnosis": diagnosis,
                 "time_occurred": time_str, "content": content,
-                # 相容舊版資料設定
                 "is_er": (location == "急診") 
             })
             save_handovers(st.session_state.handovers)
@@ -133,7 +131,6 @@ st.header("3. 已登錄交班事項")
 if not st.session_state.handovers:
     st.info("目前尚無交班紀錄。")
 else:
-    # 優先排序：急診 > 其他病房，然後按時間排序
     sorted_view = sorted(st.session_state.handovers, key=lambda x: (x.get('location', '') != '急診', x.get('time_occurred', '')))
     
     for h in sorted_view:
@@ -161,7 +158,6 @@ else:
 
 # ================= 區塊 4：純文字無痕對位填表引擎 =================
 def get_unique_cells(row):
-    """過濾合併儲存格"""
     unique_cells = []
     for cell in row.cells:
         if cell not in unique_cells:
@@ -169,11 +165,15 @@ def get_unique_cells(row):
     return unique_cells
 
 def safe_fill_cell(cell, text):
+    """安全填入：強制縮小字體並砍掉段落間距，絕對不撐開表格"""
     if text is None or text == "": return
     for p in cell.paragraphs: p.text = "" 
     p = cell.paragraphs[0] if cell.paragraphs else cell.add_paragraph()
     run = p.add_run(str(text))
     run.font.size = Pt(10)
+    # 鎖死段落上下間距
+    p.paragraph_format.space_before = Pt(0)
+    p.paragraph_format.space_after = Pt(0)
 
 def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, selected_date):
     if not os.path.exists(TEMPLATE_PATH):
@@ -193,7 +193,7 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
                 for p in cell.paragraphs:
                     if "日期" in p.text.replace(" ", ""): p.text = date_str
 
-    # --- 1. 導彈級自動對位填寫 (絕對不增刪行) ---
+    # --- 1. 導彈級自動對位填寫 ---
     new_idx = 0
     out_idx = 0
     
@@ -207,7 +207,7 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
                 
             row_text_all = "".join([c.text for c in u_cells]).replace(" ", "").replace("　", "").replace("\xa0", "")
             
-            # A. 護理站導彈鎖定填寫
+            # A. 護理站填寫
             matched_station = None
             for key_name in ["急診護理站", "二樓護理站", "三樓護理站", "四樓護理站", "五樓護理站", "總人數"]:
                 if key_name in row_text_all:
@@ -228,7 +228,7 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
                     safe_fill_cell(u_cells[target_idx+3], nums[2])
                 continue
             
-            # B. 啟動病人填寫模式並鎖定欄位
+            # B. 啟動病人填寫模式
             if "姓名" in row_text_all and "病歷" in row_text_all:
                 if "燈號" in row_text_all or "強制" in row_text_all:
                     fill_mode = "new"
@@ -242,11 +242,9 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
                         break
                 continue
                 
-            # C. 關閉填寫模式
             if fill_mode and ("出院病人" in row_text_all or "危險評估" in row_text_all or "自殺顧慮" in row_text_all or "病房特殊" in row_text_all):
                 fill_mode = None
                 
-            # D. 填入病人
             if fill_mode and name_col_idx < len(u_cells):
                 c_name = u_cells[name_col_idx].text.replace(" ", "").replace("_", "").replace("0", "").strip()
                 c_name = re.sub(r'[\r\n\t]', '', c_name)
@@ -274,12 +272,11 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
                     if len(u_cells) > name_col_idx+6 and len(p_data) > 6: safe_fill_cell(u_cells[name_col_idx+6], p_data[6])
                     out_idx += 1
 
-    # --- 3. 填寫交班事項 (【核心修改】標準化純文字字串組裝) ---
+    # --- 3. 填寫交班事項 (標準化純字體連續組裝，觸發 Word 原生自動換行) ---
     sorted_handovers = sorted(handovers, key=lambda x: (x.get('location', '') != '急診', x.get('time_occurred', '')))
     
-    h_text = "\n"
+    h_text_list = []
     for h in sorted_handovers:
-        # 取出資料，做好防呆
         h_loc = h.get('location', '急診')
         h_name = h.get('name', '')
         h_age = h.get('age', '')
@@ -288,30 +285,24 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
         h_diag = h.get('diagnosis', '')
         h_med = h.get('med_record', '')
         h_time = h.get('time_occurred', '')
-        h_content = h.get('content', '')
+        # 【重要防撐開】：把交班內容裡面的 Enter 取代成空白，強迫 Word 橫向延展自動換行，而非往下拉長儲存格
+        h_content = h.get('content', '').replace('\n', ' ') 
 
-        # 1. 處理「XX歲X性」
+        # 組裝條件字串
         age_str = f"{h_age}歲" if h_age else ""
         gen_str = f"{h_gender}性" if h_gender else ""
         age_gen_combined = f"{age_str}{gen_str}"
-        patient_info = f" {age_gen_combined}，" if age_gen_combined else "，" # 若都有空則只顯示逗點，串接醫師
+        patient_info = f" {age_gen_combined}，" if age_gen_combined else "，" 
 
-        # 2. 處理「XX醫師(X樓)病人」
         att_ward_str = f"({h_loc.replace('病房', '')})" if h_loc != "急診" else ""
         attending_info = f"{h_att}醫師{att_ward_str}病人" if h_att else f"{att_ward_str}病人"
 
-        # 3. 處理「，診斷XX」
         diag_info = f"，診斷{h_diag}" if h_diag else ""
-
-        # 4. 處理「，病歷號: XXX」
         med_info = f"，病歷號: {h_med}" if h_med else ""
-
-        # 5. 處理「 XX時」
         time_info = f" {h_time}時" if h_time else ""
 
-        # 6. 最終組裝成一行字
-        line_str = f"({h_loc}){h_name}{patient_info}{attending_info}{diag_info}{med_info}{time_info}，{h_content}\n"
-        h_text += line_str
+        line_str = f"({h_loc}){h_name}{patient_info}{attending_info}{diag_info}{med_info}{time_info}，{h_content}"
+        h_text_list.append(line_str)
 
     # 寫入 Word，嚴格控制字體大小 Pt(10) 防止撐破表格
     inserted = False
@@ -321,8 +312,10 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
             for cell in u_cells:
                 for p in cell.paragraphs:
                     if "病房特殊狀況及處理" in p.text.replace(" ", ""):
-                        run = p.add_run(h_text)
-                        run.font.size = Pt(10) # 鎖死字體大小
+                        # 將每一位病人的交班資料用原生換行塞進去
+                        for h_str in h_text_list:
+                            run = p.add_run("\n" + h_str)
+                            run.font.size = Pt(10)
                         inserted = True
                         break
                 if inserted: break
@@ -332,8 +325,9 @@ def build_word_document(parsed_stations, parsed_new, parsed_out, handovers, sele
     if not inserted:
         for p in doc.paragraphs:
             if "病房特殊狀況及處理" in p.text.replace(" ", ""):
-                run = p.add_run(h_text)
-                run.font.size = Pt(10)
+                for h_str in h_text_list:
+                    run = p.add_run("\n" + h_str)
+                    run.font.size = Pt(10)
                 break
 
     stream = io.BytesIO()
