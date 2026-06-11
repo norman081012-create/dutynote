@@ -528,6 +528,8 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
             if header_row_idx != -1 and discuss_row_idx != -1: target_table = table; break
         if target_table: break
 
+    is_overflow = False # ★ 修正：確保變數在此被初始化預設值
+    
     if not target_table or header_row_idx == -1 or discuss_row_idx == -1:
         # 如果無法完全對應新格式標頭，退回原始處理邏輯以策安全
         pass 
@@ -546,7 +548,6 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
         start_row_idx = header_row_idx + 1
         capacity = discuss_row_idx - start_row_idx
         
-        is_overflow = False
         chunks_on_first_page = all_chunks_to_fill
         chunks_to_move_to_new_pages = []
 
