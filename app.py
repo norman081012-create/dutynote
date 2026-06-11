@@ -242,7 +242,7 @@ if st.button("🚀 生成下載 Word", type="primary"):
             st.session_state.f_duty_doc
         )
         if overflow:
-            st.info("ℹ️ 交班內容較長，系統已自動為您排版新分頁，並確保『簽章區塊』置於最後一頁的底部不跑位！")
+            st.info("ℹ️ 交班內容較長，系統已自動為您排版新分頁，並確保『新版簽章區塊與勾選框』置於最後一頁的底部不跑位！")
         else:
             st.success("✅ 檔案已更新並備妥！")
             
