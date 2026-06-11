@@ -157,46 +157,19 @@ def visual_smart_chunker(text, max_visual_width=78):
     if current_chunk: chunks.append(current_chunk.strip())
     return chunks
 
-def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date, selected_doc):
+def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date):
     if not os.path.exists(TEMPLATE_PATH): raise FileNotFoundError(f"找不到 {TEMPLATE_PATH}。")
     doc = Document(TEMPLATE_PATH)
     
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
-    
-    def apply_signature_safely(p_element, doc_name):
-        """安全地插入簽名，避免覆蓋掉新版 Word 中的勾選框與其他格式"""
-        if not doc_name: return
-        if "值班醫師" not in p_element.text or doc_name in p_element.text: return
-        
-        for run in p_element.runs:
-            if "值班醫師" in run.text:
-                new_run = p_element.add_run(f"  {doc_name}")
-                new_run.font.size = Pt(16)
-                new_run.bold = True
-                new_run.font.name = '標楷體'
-                rPr_name = new_run._element.get_or_add_rPr()
-                rPr_name.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
-                
-                # 將帶有姓名的 Run 插入到「值班醫師」字樣正後方
-                run._element.addnext(new_run._element)
-                break
 
     # 替換日期
     for p in doc.paragraphs:
         txt = p.text.replace(" ", "")
-        # 如果是標題列中的日期
         if "日期" in txt and ("年" in txt or "月" in txt):
-            # 嘗試精準替換日期字串，保留原有標題
             try: p.text = re.sub(r'日期[：:].*日', date_str, p.text)
             except: p.text = date_str
-
-    # 填寫簽章 (遍歷所有儲存格的段落，確保勾選框不受損)
-    for table in doc.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                for p in cell.paragraphs:
-                    apply_signature_safely(p, selected_doc)
     
     # 填充護理站動態
     for table in doc.tables:
@@ -274,7 +247,6 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
             u_cells = get_unique_cells(row)
             if not u_cells: continue
             row_txt = u_cells[0].text.replace(" ", "")
-            # 針對新版模板取消嚴格的「項次」檢查，改抓核心關鍵字
             if "病房特殊狀況及處理" in row_txt: header_row_idx = idx
             if "討論與講評" in row_txt: discuss_row_idx = idx
             if header_row_idx != -1 and discuss_row_idx != -1: target_table = table; break
@@ -284,6 +256,7 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
     
     if target_table and header_row_idx != -1 and discuss_row_idx != -1:
         # 1. 提取並備份「討論與講評」及底部所有帶有勾選框的簽章區塊 XML
+        # 因為我們是直接備份整個區塊 XML，所以不論您模板有4行還是6行空白，都會被一字不漏保留
         discuss_rows_xml = []
         for r_idx in range(discuss_row_idx, len(target_table.rows)):
             discuss_rows_xml.append(deepcopy(target_table.rows[r_idx]._element))
@@ -310,21 +283,18 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
         # 5. 若溢出，複製原表格架構，建立新頁面
         if chunks_overflow:
             is_overflow = True
-            # 以 15 行為一頁基準 (可依據版面調整)
             chunk_groups = [chunks_overflow[i:i + 15] for i in range(0, len(chunks_overflow), 15)]
 
             for group in chunk_groups:
                 p = doc.add_paragraph()
                 p.add_run().add_break(WD_BREAK.PAGE)
                 
-                # 複製一個包含原始表格所有欄寬設定 (tblGrid) 的全新表格
+                # 複製一個包含原始表格所有欄寬設定的全新表格
                 new_table_xml = deepcopy(target_table._element)
                 all_trs = new_table_xml.xpath('.//w:tr')
-                # 刪除標頭以外的空白資料行
                 for tr in all_trs[header_row_idx + 1:]:
                     new_table_xml.remove(tr)
 
-                # 填充資料
                 source_row_xml = deepcopy(target_table.rows[start_row_idx]._element)
                 for chunk_text in group:
                     new_row = deepcopy(source_row_xml)
@@ -334,7 +304,7 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
                     safe_fill_cell(cell, chunk_text, font_size=12)
 
                 doc._body._element.append(new_table_xml)
-                final_table_xml = new_table_xml # 更新最後一個表格指標
+                final_table_xml = new_table_xml
 
         # 6. 將剛剛備份的「討論與講評與新版簽章區塊」完美拼貼至最後一個表格尾端
         for r_xml in discuss_rows_xml:
