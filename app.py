@@ -28,7 +28,6 @@ if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
 
 now_tw = datetime.datetime.now(tw_tz)
 if "f_duty_date" not in st.session_state: st.session_state.f_duty_date = now_tw.date()
-if "f_duty_doc" not in st.session_state: st.session_state.f_duty_doc = ""
     
 if "f_loc" not in st.session_state:
     st.session_state.update({
@@ -81,7 +80,6 @@ def cb_refresh():
     clear_form()
     st.session_state.uploader_key += 1
     st.session_state.f_duty_date = datetime.datetime.now(tw_tz).date()
-    st.session_state.f_duty_doc = ""
 
 def cb_add():
     if not st.session_state.f_name or not st.session_state.f_content:
@@ -129,7 +127,7 @@ c_date, c_his, c_prn = st.columns([2, 4, 4])
 
 with c_date:
     st.date_input("📅 選擇值班日期", key="f_duty_date")
-    st.selectbox("👨‍⚕️ 選擇值班醫師", ATTENDING_DOCS_GLOBAL, key="f_duty_doc")
+    # (已移除選擇值班醫師選單)
 
 with c_his:
     raw_his = st.text_area("📝 貼上 HIS 內容 (人數/出入院)", height=150, key=f"his_{st.session_state.uploader_key}")
@@ -235,11 +233,11 @@ if preview_lines:
 
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
+        # 已移除 selected_doc 參數
         f_stream, overflow = build_word_and_check_overflow(
             parsed_stations, parsed_new, parsed_out, 
             preview_lines, 
-            st.session_state.f_duty_date, 
-            st.session_state.f_duty_doc
+            st.session_state.f_duty_date
         )
         if overflow:
             st.info("ℹ️ 交班內容較長，系統已自動為您排版新分頁，並確保『新版簽章區塊與勾選框』置於最後一頁的底部不跑位！")
