@@ -164,28 +164,39 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
     roc_year = selected_date.year - 1911
     date_str = f"日期： {roc_year} 年 {selected_date.month:02d} 月 {selected_date.day:02d} 日"
     
-    def apply_signature(p_element, doc_name):
-        p_element.text = "" 
-        run_label = p_element.add_run("值班醫師：")
-        if doc_name:
-            run_name = p_element.add_run(f"  {doc_name}")
-            run_name.font.size = Pt(16)
-            run_name.bold = True
-            run_name.font.name = '標楷體'
-            rPr_name = run_name._element.get_or_add_rPr()
-            rPr_name.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
-        p_element.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    def apply_signature_safely(p_element, doc_name):
+        """安全地插入簽名，避免覆蓋掉新版 Word 中的勾選框與其他格式"""
+        if not doc_name: return
+        if "值班醫師" not in p_element.text or doc_name in p_element.text: return
+        
+        for run in p_element.runs:
+            if "值班醫師" in run.text:
+                new_run = p_element.add_run(f"  {doc_name}")
+                new_run.font.size = Pt(16)
+                new_run.bold = True
+                new_run.font.name = '標楷體'
+                rPr_name = new_run._element.get_or_add_rPr()
+                rPr_name.get_or_add_rFonts().set(qn('w:eastAsia'), '標楷體')
+                
+                # 將帶有姓名的 Run 插入到「值班醫師」字樣正後方
+                run._element.addnext(new_run._element)
+                break
 
+    # 替換日期
     for p in doc.paragraphs:
         txt = p.text.replace(" ", "")
-        if "日期" in txt and ("年" in txt or "月" in txt): p.text = date_str
-        elif "值班醫師" in txt: apply_signature(p, selected_doc)
+        # 如果是標題列中的日期
+        if "日期" in txt and ("年" in txt or "月" in txt):
+            # 嘗試精準替換日期字串，保留原有標題
+            try: p.text = re.sub(r'日期[：:].*日', date_str, p.text)
+            except: p.text = date_str
 
+    # 填寫簽章 (遍歷所有儲存格的段落，確保勾選框不受損)
     for table in doc.tables:
         for row in table.rows:
             for cell in row.cells:
                 for p in cell.paragraphs:
-                    if "值班醫師" in p.text.replace(" ", ""): apply_signature(p, selected_doc)
+                    apply_signature_safely(p, selected_doc)
     
     # 填充護理站動態
     for table in doc.tables:
@@ -251,7 +262,7 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
                 try: row._element.getparent().remove(row._element)
                 except: pass
 
-    # ================= 核心邏輯：動態分頁與完美保存底部簽章 =================
+    # ================= 核心邏輯：動態分頁與完美保存底部新版簽章 =================
     all_chunks_to_fill = []
     for line in lines:
         if line == "": all_chunks_to_fill.append("")
@@ -263,7 +274,8 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
             u_cells = get_unique_cells(row)
             if not u_cells: continue
             row_txt = u_cells[0].text.replace(" ", "")
-            if "項次" in row_txt and "病房特殊狀況及處理" in row_txt: header_row_idx = idx
+            # 針對新版模板取消嚴格的「項次」檢查，改抓核心關鍵字
+            if "病房特殊狀況及處理" in row_txt: header_row_idx = idx
             if "討論與講評" in row_txt: discuss_row_idx = idx
             if header_row_idx != -1 and discuss_row_idx != -1: target_table = table; break
         if target_table: break
@@ -271,7 +283,7 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
     is_overflow = False 
     
     if target_table and header_row_idx != -1 and discuss_row_idx != -1:
-        # 1. 提取並備份「討論與講評」及底部簽章區塊的 XML
+        # 1. 提取並備份「討論與講評」及底部所有帶有勾選框的簽章區塊 XML
         discuss_rows_xml = []
         for r_idx in range(discuss_row_idx, len(target_table.rows)):
             discuss_rows_xml.append(deepcopy(target_table.rows[r_idx]._element))
@@ -324,7 +336,7 @@ def build_word_and_check_overflow(p_stations, p_new, p_out, lines, selected_date
                 doc._body._element.append(new_table_xml)
                 final_table_xml = new_table_xml # 更新最後一個表格指標
 
-        # 6. 將剛剛備份的「討論與講評與簽章區塊」完美拼貼至最後一個表格尾端
+        # 6. 將剛剛備份的「討論與講評與新版簽章區塊」完美拼貼至最後一個表格尾端
         for r_xml in discuss_rows_xml:
             final_table_xml.append(deepcopy(r_xml))
 
