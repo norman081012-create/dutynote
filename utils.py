@@ -16,9 +16,9 @@ tw_tz = timezone(timedelta(hours=8))
 TEMPLATE_PATH = "template.docx"
 DB_FILE = "handovers.json"
 
-ATTENDING_DOCS_GLOBAL = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
-ATTENDING_DOCS_FORM = ["太忙了沒時間問", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "唐銘駿", "吳騂", "張維紘"]
-DIAG_CHOICES_FORM = ["太忙了沒時間問", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
+ATTENDING_DOCS_GLOBAL = ["", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "簡維廷", "唐銘駿", "張維紘"]
+ATTENDING_DOCS_FORM = ["未選擇", "鍾偉倫", "張志華", "成毓賢", "劉俊麟", "謝金村", "簡維廷", "唐銘駿", "張維紘"]
+DIAG_CHOICES_FORM = ["未選擇", "Schizophrenia", "bipolar", "depression", "其他 (請於下方輸入)"]
 
 # ================= 資料處理與排序函數 =================
 def load_handovers():
