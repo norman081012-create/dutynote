@@ -8,9 +8,94 @@ from utils import (
 
 st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
 
+
+# ================= HIS 解析修正層 =================
+# 問題：原本 parse_his_data 會把「入院燈號空白」的新入院病人誤判成出院病人。
+# 做法：先依段落標題自行判斷每列屬於新入院 / 出院，再把每列單獨交給原本的
+#       parse_his_data 解析（空燈號暫填「紅」以確保被正確分類，解析後再清空），
+#       如此輸出格式與原本完全相同，Word 產生器不需修改。
+HIS_COLS = ["病患姓名", "病歷號", "床號", "姓別", "年齡", "ICD10碼"]
+HEADER_NEW = "\t".join(HIS_COLS + ["入院燈號"])
+HEADER_OUT = "\t".join(HIS_COLS + ["出院動態"])
+PH_NEW = "紅"          # 新入院空燈號的暫填值（已知可被正確判為新入院）
+PH_OUT = "__BLANK__"   # 出院空動態的暫填值
+
+
+def _split_his_sections(raw):
+    """依段落標題切出新入院 / 出院的列，每列補齊為 7 欄（保留空欄位）。"""
+    new_rows, out_rows = [], []
+    section = None
+    for line in raw.splitlines():
+        cells = [c.strip() for c in line.split("\t")]
+        while cells and cells[-1] == "":
+            cells.pop()
+        if not cells or cells[0] == "":
+            continue
+        head = cells[0]
+        if head == "護理站":
+            section = "station"; continue
+        if head.startswith("新入院"):
+            section = "new"; continue
+        if head.startswith("出院病人"):
+            section = "out"; continue
+        if head == "病患姓名":
+            continue
+        if section in ("new", "out"):
+            cells = (cells + [""] * 7)[:7]
+            (new_rows if section == "new" else out_rows).append(cells)
+    return new_rows, out_rows
+
+
+def _blank_placeholder(obj, ph):
+    """把解析結果中等於暫填值的欄位清成空字串，保持原本資料型別。"""
+    if isinstance(obj, dict):
+        return {k: _blank_placeholder(v, ph) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_blank_placeholder(v, ph) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_blank_placeholder(v, ph) for v in obj)
+    if isinstance(obj, str) and obj.strip() == ph:
+        return ""
+    return obj
+
+
+def _reparse_row(cells, section):
+    cells = list(cells)
+    ph = None
+    if cells[6] == "":
+        ph = PH_NEW if section == "new" else PH_OUT
+        cells[6] = ph
+    title, header = ("新入院病人", HEADER_NEW) if section == "new" else ("出院病人", HEADER_OUT)
+    text = f"{title}\n{header}\n" + "\t".join(cells)
+    _, n, o = parse_his_data(text)
+    primary, secondary = (n, o) if section == "new" else (o, n)
+    got = primary or secondary
+    if not got:
+        return None
+    entry = got[0]
+    return _blank_placeholder(entry, ph) if ph else entry
+
+
+def parse_his_data_fixed(raw):
+    stations, orig_new, orig_out = parse_his_data(raw)
+    if not raw or not raw.strip():
+        return stations, orig_new, orig_out
+    try:
+        new_rows, out_rows = _split_his_sections(raw)
+        if not new_rows and not out_rows:
+            return stations, orig_new, orig_out
+        fixed_new = [_reparse_row(r, "new") for r in new_rows]
+        fixed_out = [_reparse_row(r, "out") for r in out_rows]
+        # 任何一列解析失敗就退回原結果，避免病人被默默漏掉
+        if any(e is None for e in fixed_new + fixed_out):
+            return stations, orig_new, orig_out
+        return stations, fixed_new, fixed_out
+    except Exception:
+        return stations, orig_new, orig_out
+
+
 # 年齡選單 (往上 49~1，預設未選擇，往下 50~110)
 age_options = [str(i) for i in range(1, 50)] + ["未選擇"] + [str(i) for i in range(50, 111)]
-default_age_idx = age_options.index("未選擇")
 
 # --- CSS 樣式注入 ---
 st.markdown("""
@@ -28,7 +113,7 @@ if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
 
 now_tw = datetime.datetime.now(tw_tz)
 if "f_duty_date" not in st.session_state: st.session_state.f_duty_date = now_tw.date()
-    
+
 if "f_loc" not in st.session_state:
     st.session_state.update({
         "f_loc": "病房", "f_name": "", "f_age": "未選擇", "f_gen": "",
@@ -42,7 +127,7 @@ def clear_form():
     st.session_state.update({
         "f_loc": "病房", "f_name": "", "f_age": "未選擇", "f_gen": "",
         "f_med": "", "f_hist": "", "f_time": datetime.time(18, 0),
-        "f_doc": "未選擇", "f_diag_c": "未選擇", "f_diag_m": "", 
+        "f_doc": "未選擇", "f_diag_c": "未選擇", "f_diag_m": "",
         "f_content": "", "f_special": False, "add_error": False
     })
 
@@ -56,10 +141,10 @@ def load_form(h):
     st.session_state.f_hist = h.get("history", "")
     try: st.session_state.f_time = datetime.datetime.strptime(h.get("time_occurred", "00:00"), "%H:%M").time()
     except: st.session_state.f_time = datetime.time(18, 0)
-        
+
     doc = h.get("attending_doc", "")
     st.session_state.f_doc = "未選擇" if doc == "" else doc
-    
+
     diag = h.get("diagnosis", "")
     if diag in ["Schizophrenia", "bipolar", "depression"]:
         st.session_state.f_diag_c = diag
@@ -70,7 +155,7 @@ def load_form(h):
     else:
         st.session_state.f_diag_c = "其他 (請於下方輸入)"
         st.session_state.f_diag_m = diag
-        
+
     st.session_state.f_content = h.get("content", "")
     st.session_state.f_special = h.get("is_special", False)
 
@@ -92,7 +177,7 @@ def cb_add():
         doc_val = "" if st.session_state.f_doc == "未選擇" else st.session_state.f_doc
 
         st.session_state.handovers.append({
-            "location": st.session_state.f_loc, "name": st.session_state.f_name, 
+            "location": st.session_state.f_loc, "name": st.session_state.f_name,
             "age": age_val, "gender": st.session_state.f_gen,
             "med_record": st.session_state.f_med, "attending_doc": doc_val,
             "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
@@ -125,11 +210,12 @@ c_date, c_his, c_prn = st.columns([2, 4, 4])
 
 with c_date:
     st.date_input("📅 選擇值班日期", key="f_duty_date")
-    # (已移除選擇值班醫師選單)
 
 with c_his:
     raw_his = st.text_area("📝 貼上 HIS 內容 (人數/出入院)", height=150, key=f"his_{st.session_state.uploader_key}")
-    parsed_stations, parsed_new, parsed_out = parse_his_data(raw_his)
+    parsed_stations, parsed_new, parsed_out = parse_his_data_fixed(raw_his)
+    if raw_his and raw_his.strip():
+        st.caption(f"解析結果：新入院 {len(parsed_new)} 人、出院 {len(parsed_out)} 人")
 
 with c_prn:
     raw_prn = st.text_area("💊 貼上 PRN 藥物清單 (選填)", height=150, key=f"prn_{st.session_state.uploader_key}")
@@ -141,18 +227,18 @@ c1, c2 = st.columns(2)
 with c1:
     st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"], key="f_loc")
     st.text_input("病人姓名 (必填)", key="f_name")
-    st.selectbox("年紀", age_options, index=default_age_idx, key="f_age")
+    st.selectbox("年紀", age_options, key="f_age")
     st.selectbox("性別", ["", "男", "女"], key="f_gen")
     st.text_input("病歷號", key="f_med")
     st.text_area("內外科病史輸入", height=60, key="f_hist")
-    
+
 with c2:
     st.time_input("狀況發生時間", key="f_time")
     st.selectbox("主治醫師", ATTENDING_DOCS_FORM, key="f_doc")
     st.selectbox("診斷快速選項", DIAG_CHOICES_FORM, key="f_diag_c")
-    st.text_input("手手動輸入診斷 (若選其他)", key="f_diag_m")
+    st.text_input("手動輸入診斷 (若選其他)", key="f_diag_m")
     st.checkbox("🚨 特別交班", key="f_special")
-    
+
 st.text_area("交班內容 (必填)", key="f_content")
 
 btn_col1, btn_col2, btn_col3 = st.columns([2, 1, 1])
@@ -171,12 +257,12 @@ if st.session_state.handovers:
         h_age_disp = h['age'] if h.get('age') else "?"
         h_gen_disp = f"{h['gender']}性" if h.get('gender') else ""
         sp_tag = " [🚨特別交班]" if h.get('is_special') else ""
-        
+
         with st.expander(f"[{h['location']}] {h['name']} ({h_age_disp}歲{h_gen_disp}) - {h['time_occurred']}{sp_tag}"):
             h_diag_disp = h['diagnosis'] if h.get('diagnosis') else "??"
             st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h_diag_disp}")
             st.write(f"內容：{h['content']}")
-            
+
             c_edit, c_del, c_empty = st.columns([1.5, 1.5, 7])
             with c_edit: st.button(f"✏️ 修改 {h['name']}", key=f"edit_{idx}", on_click=cb_edit, args=(idx, h))
             with c_del: st.button(f"🗑️ 刪除 {h['name']}", key=f"del_{idx}", on_click=cb_delete, args=(idx,))
@@ -184,7 +270,6 @@ if st.session_state.handovers:
 # ================= 工具與輸出 =================
 st.header("4. 預覽與輸出")
 
-# 生成最終預覽文字
 preview_lines = []
 sorted_h = sorted(st.session_state.handovers, key=get_sort_key)
 for h in sorted_h:
@@ -204,19 +289,19 @@ for h in sorted_h:
     age_gen_part = f"，{h_age_display}歲{h_gen_display}"
     med_part = f"病歷號:{h_med} " if h_med else ""
     pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
-    
+
     ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
     doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else ""
     his_part = f"內外科病史:{h_his}" if h_his else ""
     if not h_diag: h_diag = "??"
     diag_part = f"診斷:{h_diag}"
     time_part = f"約{h_time}時" if h_time else ""
-    
+
     diag_time = ""
     if diag_part and time_part: diag_time = f"{diag_part} {time_part}"
     elif diag_part: diag_time = diag_part
     elif time_part: diag_time = time_part
-        
+
     components = [c for c in [pt_part, doc_part, his_part, diag_time, h_content] if c.strip()]
     preview_lines.append("，".join(components))
 
@@ -231,17 +316,16 @@ if preview_lines:
 
 if st.button("🚀 生成下載 Word", type="primary"):
     try:
-        # 已移除 selected_doc 參數
         f_stream, overflow = build_word_and_check_overflow(
-            parsed_stations, parsed_new, parsed_out, 
-            preview_lines, 
+            parsed_stations, parsed_new, parsed_out,
+            preview_lines,
             st.session_state.f_duty_date
         )
         if overflow:
             st.info("ℹ️ 交班內容較長，系統已自動為您排版新分頁，並確保『新版簽章區塊與勾選框』置於最後一頁的底部不跑位！")
         else:
             st.success("✅ 檔案已更新並備妥！")
-            
+
         st.download_button("📥 點擊下載", f_stream, f"值班日誌_{st.session_state.f_duty_date.strftime('%Y%m%d')}.docx")
     except Exception as e:
         st.error(f"錯誤: {e}")
