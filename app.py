@@ -1,331 +1,232 @@
+"""
+台灣健保降血脂藥物給付規範｜門診速查（表一：ASCVD 風險分級）
+依據：衛福部健保署「全民健康保險降血脂藥物給付規定」修訂對照表（115/9/1 生效）
+本工具為臨床速查摘要；實際申報以健保署最新公告及健保藥品代碼為準。
+執行：pip install streamlit && streamlit run ldl_app.py
+"""
 import streamlit as st
-import datetime
-from utils import (
-    tw_tz, ATTENDING_DOCS_GLOBAL, ATTENDING_DOCS_FORM, DIAG_CHOICES_FORM,
-    load_handovers, save_handovers, parse_his_data, parse_prn_data,
-    get_sort_key, build_word_and_check_overflow
-)
 
-st.set_page_config(page_title="值班日誌自動生成器", layout="wide")
+st.set_page_config(page_title="降血脂給付速查", page_icon="🩺", layout="wide")
 
+# ---------- 規範資料（表一） ----------
+LEVELS = {
+    "極高": dict(color="#B3392F", start=55, ldl=55, nonhdl=85, drug_first=True,
+               tx="改善風險因子＋中至高強度 statin，可合併 ezetimibe；6–8 週複查。",
+               fu="達標後每 6 個月追蹤。"),
+    "非常高": dict(color="#D2622A", start=70, ldl=70, nonhdl=100, drug_first=True,
+                tx="改善風險因子＋中至高強度 statin，可合併 ezetimibe；6–8 週複查。",
+                fu="達標後每 6 個月追蹤。"),
+    "高": dict(color="#C98A1A", start=100, ldl=100, nonhdl=130, drug_first=True,
+              tx="生活調整與藥物並行；中至高強度 statin，可合併 ezetimibe；6–8 週複查。",
+              fu="達標後每 6 個月追蹤。"),
+    "中": dict(color="#22857A", start=115, ldl=115, nonhdl=145, drug_first=False,
+              tx="先生活型態調整 3–6 個月；未達標開始中強度 statin，6–8 週複查。",
+              fu="達標後每 6–12 個月追蹤。"),
+    "低": dict(color="#3F7D4E", start=130, ldl=130, nonhdl=160, drug_first=False,
+              tx="先生活型態調整 3–6 個月；未達標開始中強度 statin，6–8 週複查。",
+              fu="達標後每 6–12 個月追蹤。"),
+    "0項": dict(color="#235E8C", start=160, ldl=160, nonhdl=None, drug_first=False,
+               tx="依中、低風險流程：先生活型態調整 3–6 個月，未達標再開始藥物治療。",
+               fu="依中、低風險：達標後每 6–12 個月追蹤。"),
+}
 
-# ================= HIS 解析修正層 =================
-# 問題：原本 parse_his_data 會把「入院燈號空白」的新入院病人誤判成出院病人。
-# 做法：先依段落標題自行判斷每列屬於新入院 / 出院，再把每列單獨交給原本的
-#       parse_his_data 解析（空燈號暫填「紅」以確保被正確分類，解析後再清空），
-#       如此輸出格式與原本完全相同，Word 產生器不需修改。
-HIS_COLS = ["病患姓名", "病歷號", "床號", "姓別", "年齡", "ICD10碼"]
-HEADER_NEW = "\t".join(HIS_COLS + ["入院燈號"])
-HEADER_OUT = "\t".join(HIS_COLS + ["出院動態"])
-PH_NEW = "紅"          # 新入院空燈號的暫填值（已知可被正確判為新入院）
-PH_OUT = "__BLANK__"   # 出院空動態的暫填值
+EXTREME = [
+    "冠心病＋1 年內 MI",
+    "冠心病＋≥2 次 MI",
+    "冠心病＋多支病變",
+    "冠心病＋ACS 合併 DM",
+    "冠心病＋PAD 或頸動脈狹窄",
+    "PAD 合併冠心病／頸動脈狹窄",
+]
+VERY_HIGH = [
+    "ACS 病史",
+    "曾血管再通術",
+    "特定缺血性中風／TIA",
+    "症狀性或曾介入／截肢之 PAD",
+    "影像顯示血管狹窄 ≥50%",
+]
 
-
-def _split_his_sections(raw):
-    """依段落標題切出新入院 / 出院的列，每列補齊為 7 欄（保留空欄位）。"""
-    new_rows, out_rows = [], []
-    section = None
-    for line in raw.splitlines():
-        cells = [c.strip() for c in line.split("\t")]
-        while cells and cells[-1] == "":
-            cells.pop()
-        if not cells or cells[0] == "":
-            continue
-        head = cells[0]
-        if head == "護理站":
-            section = "station"; continue
-        if head.startswith("新入院"):
-            section = "new"; continue
-        if head.startswith("出院病人"):
-            section = "out"; continue
-        if head == "病患姓名":
-            continue
-        if section in ("new", "out"):
-            cells = (cells + [""] * 7)[:7]
-            (new_rows if section == "new" else out_rows).append(cells)
-    return new_rows, out_rows
-
-
-def _blank_placeholder(obj, ph):
-    """把解析結果中等於暫填值的欄位清成空字串，保持原本資料型別。"""
-    if isinstance(obj, dict):
-        return {k: _blank_placeholder(v, ph) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_blank_placeholder(v, ph) for v in obj]
-    if isinstance(obj, tuple):
-        return tuple(_blank_placeholder(v, ph) for v in obj)
-    if isinstance(obj, str) and obj.strip() == ph:
-        return ""
-    return obj
-
-
-def _reparse_row(cells, section):
-    cells = list(cells)
-    ph = None
-    if cells[6] == "":
-        ph = PH_NEW if section == "new" else PH_OUT
-        cells[6] = ph
-    title, header = ("新入院病人", HEADER_NEW) if section == "new" else ("出院病人", HEADER_OUT)
-    text = f"{title}\n{header}\n" + "\t".join(cells)
-    _, n, o = parse_his_data(text)
-    primary, secondary = (n, o) if section == "new" else (o, n)
-    got = primary or secondary
-    if not got:
-        return None
-    entry = got[0]
-    return _blank_placeholder(entry, ph) if ph else entry
-
-
-def parse_his_data_fixed(raw):
-    stations, orig_new, orig_out = parse_his_data(raw)
-    if not raw or not raw.strip():
-        return stations, orig_new, orig_out
-    try:
-        new_rows, out_rows = _split_his_sections(raw)
-        if not new_rows and not out_rows:
-            return stations, orig_new, orig_out
-        fixed_new = [_reparse_row(r, "new") for r in new_rows]
-        fixed_out = [_reparse_row(r, "out") for r in out_rows]
-        # 任何一列解析失敗就退回原結果，避免病人被默默漏掉
-        if any(e is None for e in fixed_new + fixed_out):
-            return stations, orig_new, orig_out
-        return stations, fixed_new, fixed_out
-    except Exception:
-        return stations, orig_new, orig_out
-
-
-# 年齡選單 (往上 49~1，預設未選擇，往下 50~110)
-age_options = [str(i) for i in range(1, 50)] + ["未選擇"] + [str(i) for i in range(50, 111)]
-
-# --- CSS 樣式注入 ---
+# ---------- 樣式 ----------
 st.markdown("""
 <style>
-div[data-baseweb="input"] input { text-align: center !important; }
-div[data-baseweb="select"] div { text-align: center !important; justify-content: center !important; }
-div[data-testid="stAlert"] { margin-bottom: 0px !important; padding-top: 10px !important; padding-bottom: 10px !important; }
-h2 { padding-top: 0.5rem !important; }
+.block-container {padding-top: 1.6rem; max-width: 1200px;}
+.result {border-left: 10px solid var(--c); background: color-mix(in srgb, var(--c) 7%, transparent);
+         padding: 1rem 1.2rem; border-radius: 4px; margin-bottom: .8rem;}
+.result h2 {margin: 0; color: var(--c); font-size: 2.1rem;}
+.result .why {font-size: .9rem; opacity: .8; margin-top: .2rem;}
+.nums {display: flex; gap: 2rem; margin: .8rem 0 .2rem; flex-wrap: wrap;}
+.nums div span {display:block; font-size: .8rem; opacity: .7;}
+.nums div b {font-size: 1.35rem;}
+.ok {color: #2E7D4F; font-weight: 600;}
+.ng {color: #B3392F; font-weight: 600;}
 </style>
 """, unsafe_allow_html=True)
 
-# ================= 表單狀態與全域設定初始化 =================
-if 'handovers' not in st.session_state: st.session_state.handovers = load_handovers()
-if 'uploader_key' not in st.session_state: st.session_state.uploader_key = 0
+st.title("降血脂藥物給付速查")
+st.caption("健保降血脂藥物給付規定（115 年 9 月 1 日生效）・表一 ASCVD 風險分級。例外代碼（第 2 頁）未納入。")
 
-now_tw = datetime.datetime.now(tw_tz)
-if "f_duty_date" not in st.session_state: st.session_state.f_duty_date = now_tw.date()
+left, right = st.columns([3, 2], gap="large")
 
-if "f_loc" not in st.session_state:
-    st.session_state.update({
-        "f_loc": "病房", "f_name": "", "f_age": "未選擇", "f_gen": "",
-        "f_med": "", "f_hist": "", "f_time": datetime.time(18, 0),
-        "f_doc": "未選擇", "f_diag_c": "未選擇", "f_diag_m": "", "f_content": "",
-        "f_special": False, "add_error": False
-    })
+# ---------- 輸入 ----------
+with left:
+    st.subheader("病人資料")
+    c1, c2 = st.columns(2)
+    sex = c1.radio("性別", ["男", "女"], horizontal=True)
+    age = c2.number_input("年齡", min_value=18, max_value=110, value=None, step=1, placeholder="歲")
 
-# ================= Callback =================
-def clear_form():
-    st.session_state.update({
-        "f_loc": "病房", "f_name": "", "f_age": "未選擇", "f_gen": "",
-        "f_med": "", "f_hist": "", "f_time": datetime.time(18, 0),
-        "f_doc": "未選擇", "f_diag_c": "未選擇", "f_diag_m": "",
-        "f_content": "", "f_special": False, "add_error": False
-    })
+    c1, c2, c3 = st.columns(3)
+    ldl = c1.number_input("LDL-C", min_value=0.0, value=None, step=1.0, placeholder="mg/dL")
+    tc = c2.number_input("TC", min_value=0.0, value=None, step=1.0, placeholder="mg/dL")
+    hdl = c3.number_input("HDL-C", min_value=0.0, value=None, step=1.0, placeholder="mg/dL")
+    nonhdl = (tc - hdl) if (tc is not None and hdl is not None) else None
+    if nonhdl is not None:
+        st.caption(f"non-HDL-C（TC − HDL）= {nonhdl:.0f} mg/dL")
 
-def load_form(h):
-    st.session_state.f_loc = h.get("location", "病房")
-    st.session_state.f_name = h.get("name", "")
-    age = h.get("age", "")
-    st.session_state.f_age = "未選擇" if age == "" else age
-    st.session_state.f_gen = h.get("gender", "")
-    st.session_state.f_med = h.get("med_record", "")
-    st.session_state.f_hist = h.get("history", "")
-    try: st.session_state.f_time = datetime.datetime.strptime(h.get("time_occurred", "00:00"), "%H:%M").time()
-    except: st.session_state.f_time = datetime.time(18, 0)
+    st.subheader("1. 臨床 ASCVD")
+    with st.container(border=True):
+        st.markdown("**極高**：冠狀動脈疾病合併下列任一，或 PAD 合併冠心病／頸動脈狹窄")
+        ext_hit = [x for x in EXTREME if st.checkbox(x, key=f"e_{x}")]
+    with st.container(border=True):
+        st.markdown("**非常高**：臨床 ASCVD")
+        vh_hit = [x for x in VERY_HIGH if st.checkbox(x, key=f"v_{x}")]
 
-    doc = h.get("attending_doc", "")
-    st.session_state.f_doc = "未選擇" if doc == "" else doc
+    st.subheader("2. 高風險條件")
+    with st.container(border=True):
+        h_hit = []
+        if st.checkbox("糖尿病"):
+            h_hit.append("糖尿病")
+        if st.checkbox("透析前 CKD：UACR ≥30 mg/g 或 eGFR <60，持續 ≥3 個月"):
+            h_hit.append("透析前 CKD")
+        st.caption("已進入透析者不直接列入此項。")
+        if st.checkbox("CAC ≥400"):
+            h_hit.append("CAC ≥400")
+        if ldl is not None and ldl >= 190:
+            h_hit.append(f"LDL-C {ldl:.0f} ≥190")
+            st.markdown(f"<span class='ng'>LDL-C {ldl:.0f} ≥190，自動列入高風險</span>",
+                        unsafe_allow_html=True)
 
-    diag = h.get("diagnosis", "")
-    if diag in ["Schizophrenia", "bipolar", "depression"]:
-        st.session_state.f_diag_c = diag
-        st.session_state.f_diag_m = ""
-    elif diag == "":
-        st.session_state.f_diag_c = "未選擇"
-        st.session_state.f_diag_m = ""
-    else:
-        st.session_state.f_diag_c = "其他 (請於下方輸入)"
-        st.session_state.f_diag_m = diag
+    st.subheader("3. 心血管危險因子")
+    with st.container(border=True):
+        rf = []
+        if st.checkbox("高血壓"):
+            rf.append("高血壓")
 
-    st.session_state.f_content = h.get("content", "")
-    st.session_state.f_special = h.get("is_special", False)
-
-def cb_refresh():
-    st.session_state.handovers = []
-    save_handovers([])
-    clear_form()
-    st.session_state.uploader_key += 1
-    st.session_state.f_duty_date = datetime.datetime.now(tw_tz).date()
-
-def cb_add():
-    if not st.session_state.f_name or not st.session_state.f_content:
-        st.session_state.add_error = True
-    else:
-        st.session_state.add_error = False
-        diag_c_val = "" if st.session_state.f_diag_c == "未選擇" else st.session_state.f_diag_c
-        diag_final = st.session_state.f_diag_m if not diag_c_val or diag_c_val == "其他 (請於下方輸入)" else diag_c_val
-        age_val = "" if st.session_state.f_age == "未選擇" else st.session_state.f_age
-        doc_val = "" if st.session_state.f_doc == "未選擇" else st.session_state.f_doc
-
-        st.session_state.handovers.append({
-            "location": st.session_state.f_loc, "name": st.session_state.f_name,
-            "age": age_val, "gender": st.session_state.f_gen,
-            "med_record": st.session_state.f_med, "attending_doc": doc_val,
-            "time_occurred": st.session_state.f_time.strftime("%H:%M"), "content": st.session_state.f_content,
-            "diagnosis": diag_final, "history": st.session_state.f_hist,
-            "is_er": (st.session_state.f_loc == "急診"),
-            "is_special": st.session_state.f_special
-        })
-        save_handovers(st.session_state.handovers)
-        clear_form()
-
-def cb_edit(idx, h):
-    load_form(h)
-    st.session_state.handovers.pop(idx)
-    save_handovers(st.session_state.handovers)
-
-def cb_delete(idx):
-    st.session_state.handovers.pop(idx)
-    save_handovers(st.session_state.handovers)
-
-
-# ================= UI 畫面區 =================
-st.title("🏥 醫師病房值班日誌自動生成器")
-
-col_empty, col_btn = st.columns([8, 2], vertical_alignment="center")
-with col_btn:
-    st.button("🔄 刷新並清空所有資料", type="secondary", use_container_width=True, on_click=cb_refresh)
-
-st.header("1. 貼上系統匯出資料")
-c_date, c_his, c_prn = st.columns([2, 4, 4])
-
-with c_date:
-    st.date_input("📅 選擇值班日期", key="f_duty_date")
-
-with c_his:
-    raw_his = st.text_area("📝 貼上 HIS 內容 (人數/出入院)", height=150, key=f"his_{st.session_state.uploader_key}")
-    parsed_stations, parsed_new, parsed_out = parse_his_data_fixed(raw_his)
-    if raw_his and raw_his.strip():
-        st.caption(f"解析結果：新入院 {len(parsed_new)} 人、出院 {len(parsed_out)} 人")
-
-with c_prn:
-    raw_prn = st.text_area("💊 貼上 PRN 藥物清單 (選填)", height=150, key=f"prn_{st.session_state.uploader_key}")
-    prn_summary = parse_prn_data(raw_prn)
-
-# ================= 區塊 2：交班事項登錄表單 =================
-st.header("2. 交班事項登錄")
-c1, c2 = st.columns(2)
-with c1:
-    st.selectbox("單位/病房 (預設此)", ["病房", "急診", "二樓病房", "三樓病房", "四樓病房", "五樓病房"], key="f_loc")
-    st.text_input("病人姓名 (必填)", key="f_name")
-    st.selectbox("年紀", age_options, key="f_age")
-    st.selectbox("性別", ["", "男", "女"], key="f_gen")
-    st.text_input("病歷號", key="f_med")
-    st.text_area("內外科病史輸入", height=60, key="f_hist")
-
-with c2:
-    st.time_input("狀況發生時間", key="f_time")
-    st.selectbox("主治醫師", ATTENDING_DOCS_FORM, key="f_doc")
-    st.selectbox("診斷快速選項", DIAG_CHOICES_FORM, key="f_diag_c")
-    st.text_input("手動輸入診斷 (若選其他)", key="f_diag_m")
-    st.checkbox("🚨 特別交班", key="f_special")
-
-st.text_area("交班內容 (必填)", key="f_content")
-
-btn_col1, btn_col2, btn_col3 = st.columns([2, 1, 1])
-with btn_col1:
-    st.button("✅ 確認新增交班", type="primary", use_container_width=True, on_click=cb_add)
-    if st.session_state.add_error: st.error("「姓名」與「內容」為必填！")
-with btn_col2:
-    st.button("🔄 重新輸入", use_container_width=True, on_click=clear_form)
-
-# ================= 區塊 3：已登錄交班預覽 =================
-st.header("3. 已登錄交班事項")
-if st.session_state.handovers:
-    sorted_view = sorted(st.session_state.handovers, key=get_sort_key)
-    for h in sorted_view:
-        idx = st.session_state.handovers.index(h)
-        h_age_disp = h['age'] if h.get('age') else "?"
-        h_gen_disp = f"{h['gender']}性" if h.get('gender') else ""
-        sp_tag = " [🚨特別交班]" if h.get('is_special') else ""
-
-        with st.expander(f"[{h['location']}] {h['name']} ({h_age_disp}歲{h_gen_disp}) - {h['time_occurred']}{sp_tag}"):
-            h_diag_disp = h['diagnosis'] if h.get('diagnosis') else "??"
-            st.write(f"主治：{h['attending_doc']} | 病史：{h['history']} | 診斷：{h_diag_disp}")
-            st.write(f"內容：{h['content']}")
-
-            c_edit, c_del, c_empty = st.columns([1.5, 1.5, 7])
-            with c_edit: st.button(f"✏️ 修改 {h['name']}", key=f"edit_{idx}", on_click=cb_edit, args=(idx, h))
-            with c_del: st.button(f"🗑️ 刪除 {h['name']}", key=f"del_{idx}", on_click=cb_delete, args=(idx,))
-
-# ================= 工具與輸出 =================
-st.header("4. 預覽與輸出")
-
-preview_lines = []
-sorted_h = sorted(st.session_state.handovers, key=get_sort_key)
-for h in sorted_h:
-    h_loc = h.get('location', '病房')
-    h_name = h.get('name', '').strip()
-    h_age = h.get('age', '').strip()
-    h_gen = h.get('gender', '').strip()
-    h_med = h.get('med_record', '').strip()
-    h_att = h.get('attending_doc', '').strip()
-    h_diag = h.get('diagnosis', '').strip()
-    h_his = h.get('history', '').strip()
-    h_time = h.get('time_occurred', '').strip()
-    h_content = h.get('content', '').replace('\n', ' ').strip()
-
-    h_age_display = h_age if h_age else "?"
-    h_gen_display = f"{h_gen}性" if h_gen else ""
-    age_gen_part = f"，{h_age_display}歲{h_gen_display}"
-    med_part = f"病歷號:{h_med} " if h_med else ""
-    pt_part = f"({h_loc}){med_part}姓名:{h_name}{age_gen_part}"
-
-    ward_tag = f"({h_loc[0:2]})" if h_loc not in ["急診", "病房"] else ""
-    doc_part = f"{h_att}醫師{ward_tag}病人" if h_att else ""
-    his_part = f"內外科病史:{h_his}" if h_his else ""
-    if not h_diag: h_diag = "??"
-    diag_part = f"診斷:{h_diag}"
-    time_part = f"約{h_time}時" if h_time else ""
-
-    diag_time = ""
-    if diag_part and time_part: diag_time = f"{diag_part} {time_part}"
-    elif diag_part: diag_time = diag_part
-    elif time_part: diag_time = time_part
-
-    components = [c for c in [pt_part, doc_part, his_part, diag_time, h_content] if c.strip()]
-    preview_lines.append("，".join(components))
-
-# 附加 PRN 藥物
-if prn_summary:
-    preview_lines.append("")
-    preview_lines.extend(prn_summary.splitlines())
-
-if preview_lines:
-    with st.expander("👀 點擊展開：最終交班文字預覽 (與 Word 輸出內容相同)", expanded=True):
-        st.text_area("即將寫入 Word 的文字：", value="\n\n".join(preview_lines), height=250, disabled=True)
-
-if st.button("🚀 生成下載 Word", type="primary"):
-    try:
-        f_stream, overflow = build_word_and_check_overflow(
-            parsed_stations, parsed_new, parsed_out,
-            preview_lines,
-            st.session_state.f_duty_date
-        )
-        if overflow:
-            st.info("ℹ️ 交班內容較長，系統已自動為您排版新分頁，並確保『新版簽章區塊與勾選框』置於最後一頁的底部不跑位！")
+        age_cut = 45 if sex == "男" else 55
+        if age is not None:
+            age_rf = age >= age_cut
+            st.checkbox(f"年齡（{sex} ≥{age_cut}）", value=age_rf, disabled=True,
+                        help="依上方年齡自動判定")
         else:
-            st.success("✅ 檔案已更新並備妥！")
+            age_rf = st.checkbox(f"年齡（{sex} ≥{age_cut}）")
+        if age_rf:
+            rf.append("年齡")
 
-        st.download_button("📥 點擊下載", f_stream, f"值班日誌_{st.session_state.f_duty_date.strftime('%Y%m%d')}.docx")
-    except Exception as e:
-        st.error(f"錯誤: {e}")
+        if st.checkbox("早發性冠心病家族史（男 ≤55、女 ≤65 歲發病）"):
+            rf.append("早發 CHD 家族史")
+
+        hdl_cut = 40 if sex == "男" else 50
+        if hdl is not None:
+            low_hdl = hdl < hdl_cut
+            st.checkbox(f"HDL-C 偏低（{sex} <{hdl_cut}）", value=low_hdl, disabled=True,
+                        help="依上方 HDL-C 自動判定")
+        else:
+            low_hdl = st.checkbox(f"HDL-C 偏低（{sex} <{hdl_cut}）")
+        if low_hdl:
+            rf.append("HDL-C 偏低")
+
+        if st.checkbox("抽菸"):
+            rf.append("抽菸")
+
+        with st.expander("代謝性症候群（5 項中 ≥3 項）"):
+            waist = 90 if sex == "男" else 80
+            ms = [
+                st.checkbox(f"腰圍 {sex} ≥{waist} cm"),
+                st.checkbox("BP ≥130/85 或用藥"),
+                st.checkbox("空腹血糖 ≥100 或用藥"),
+                st.checkbox("TG ≥150 或用藥"),
+                low_hdl,
+            ]
+            st.caption(f"HDL-C {sex} <{hdl_cut}：{'是' if low_hdl else '否'}（同上方 HDL 項）")
+            n_ms = sum(ms)
+            st.write(f"目前 {n_ms}/5 項")
+        if n_ms >= 3:
+            rf.append("代謝性症候群")
+
+# ---------- 判定 ----------
+if ext_hit:
+    level, why = "極高", ext_hit
+elif vh_hit:
+    level, why = "非常高", vh_hit
+elif h_hit:
+    level, why = "高", h_hit
+elif len(rf) >= 2:
+    level, why = "中", rf
+elif len(rf) == 1:
+    level, why = "低", rf
+else:
+    level, why = "0項", ["無心血管危險因子"]
+
+L = LEVELS[level]
+
+# ---------- 結果 ----------
+with right:
+    why_txt = "、".join(why)
+    if level in ("中", "低"):
+        why_txt = f"危險因子 {len(rf)} 項：{why_txt}"
+    nonhdl_target = f"&lt; {L['nonhdl']}" if L["nonhdl"] else "未列"
+    st.markdown(f"""
+<div class="result" style="--c:{L['color']}">
+  <h2>{level}{'風險' if level != '0項' else '危險因子'}</h2>
+  <div class="why">{why_txt}</div>
+  <div class="nums">
+    <div><span>起始給付 LDL-C</span><b>≥ {L['start']}</b></div>
+    <div><span>目標 LDL-C</span><b>&lt; {L['ldl']}</b></div>
+    <div><span>次要目標 non-HDL-C</span><b>{nonhdl_target}</b></div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+    # 個案判讀
+    with st.container(border=True):
+        st.markdown("**本次數值**")
+        if ldl is None:
+            st.write("輸入 LDL-C 後顯示是否符合給付與達標。")
+        else:
+            if ldl >= L["start"]:
+                st.markdown(f"<span class='ng'>LDL-C {ldl:.0f} ≥ {L['start']}：符合起始給付門檻／未達標</span>",
+                            unsafe_allow_html=True)
+                if not L["drug_first"]:
+                    st.write("此級需先生活型態調整 3–6 個月，仍未達標再開始用藥。")
+            else:
+                st.markdown(f"<span class='ok'>LDL-C {ldl:.0f} &lt; {L['ldl']}：主要目標已達標</span>",
+                            unsafe_allow_html=True)
+                st.caption("未使用降脂藥者即未達起始給付門檻。")
+
+            if L["nonhdl"] and nonhdl is not None:
+                if ldl < L["ldl"]:
+                    if nonhdl < L["nonhdl"]:
+                        st.markdown(f"<span class='ok'>non-HDL-C {nonhdl:.0f} &lt; {L['nonhdl']}：次要目標達標</span>",
+                                    unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"<span class='ng'>non-HDL-C {nonhdl:.0f} ≥ {L['nonhdl']}：次要目標未達</span>",
+                                    unsafe_allow_html=True)
+                else:
+                    st.caption(f"non-HDL-C {nonhdl:.0f}：LDL-C 達標後再評估次要目標。")
+
+    with st.container(border=True):
+        st.markdown("**起始處理與首次追蹤**")
+        st.write(L["tx"])
+        st.markdown("**追蹤**")
+        st.write(L["fu"])
+        st.write("更動藥物後 1–3 個月內複查血脂。")
+        st.write("仍未達標：檢視服藥；調至高強度或最大耐受 statin，必要時合併其他降脂藥。")
+
+    with st.expander("完整分級表"):
+        for name, v in LEVELS.items():
+            nh = f"< {v['nonhdl']}" if v["nonhdl"] else "未列"
+            mark = "◀" if name == level else ""
+            st.markdown(f"**{name}**　起始 ≥{v['start']}　目標 <{v['ldl']} / {nh} {mark}")
+
+st.divider()
+st.caption("資料來源：衛福部中央健康保險署「全民健康保險降血脂藥物給付規定」修訂對照表（自 115/9/1 生效）。"
+           "本工具為臨床速查摘要；實際申報以健保署最新公告及健保藥品代碼為準。")
