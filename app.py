@@ -66,12 +66,15 @@ EXTREME = {
         "頸動脈狹窄",
     ],
 }
+# 非常高：(勾選文字, 結果卡簡稱)
 VERY_HIGH = [
-    "ACS 病史",
-    "曾血管再通術",
-    "特定缺血性中風／TIA",
-    "症狀性或曾介入／截肢之 PAD",
-    "影像顯示血管狹窄 ≥50%",
+    ("急性冠心症病史 :gray[經臨床檢查確診為動脈硬化心血管疾病]", "急性冠心症病史"),
+    ("接受血管再通術 :gray[心導管介入治療或外科冠狀動脈繞道手術]", "曾接受血管再通術"),
+    ("缺血性中風或短暫性腦缺血發作 :gray[合併動脈硬化相關疾病或病史]", "缺血性中風／TIA"),
+    ("周邊動脈疾病 :gray[曾接受血管再通術、有肢體缺血相關症狀或截肢]", "周邊動脈疾病"),
+    ("影像檢查確認顯著斑塊負擔（≧50% 直徑狹窄率） "
+     ":gray[冠狀動脈血管攝影、冠狀動脈或周邊血管電腦斷層攝影、頸動脈或周邊血管超音波]",
+     "影像確認狹窄 ≧50%"),
 ]
 
 # ---------- 樣式 ----------
@@ -96,7 +99,7 @@ left, right = st.columns([3, 2], gap="large")
 
 # ---------- 輸入 ----------
 with left:
-    st.subheader("病人資料")
+    st.subheader("1 病人資料")
     c1, c2, c3 = st.columns(3)
     sex = c1.radio("性別", ["男", "女"], horizontal=True)
     age = c2.number_input("年齡", min_value=18, max_value=110, value=None, step=1, placeholder="歲")
@@ -110,12 +113,12 @@ with left:
     if nonhdl is not None:
         st.caption(f"non-HDL-C（TC − HDL）= {nonhdl:.0f} mg/dL")
 
-    st.subheader("1. 臨床 ASCVD")
+    st.subheader("2 極高風險條件")
+    st.caption("條文分兩款，兩款都要先有主診斷再合併其一。只勾主診斷不構成極高風險。")
     with st.container(border=True):
-        st.markdown("**極高**：須先有主診斷，再合併下列任一項。只勾主診斷不構成極高風險。")
         ext_hit = []
         for main, subs in EXTREME.items():
-            if st.checkbox(f"{main}，再合併下列任一項", key=f"em_{main}"):
+            if st.checkbox(f"**{main}**再合併下列任一項", key=f"em_{main}"):
                 sub_cols = st.columns([1, 20])
                 with sub_cols[1]:
                     hits = [x for x in subs if st.checkbox(x, key=f"es_{main}_{x}")]
@@ -123,71 +126,84 @@ with left:
                     ext_hit += [f"{main[3:]}＋{x}" for x in hits]
                 else:
                     sub_cols[1].caption("尚未勾選合併條件，不列入極高風險。")
-    with st.container(border=True):
-        st.markdown("**非常高**：臨床 ASCVD")
-        vh_hit = [x for x in VERY_HIGH if st.checkbox(x, key=f"v_{x}")]
 
-    st.subheader("2. 高風險條件")
+    st.subheader("3 非常高風險條件")
+    st.caption("臨床確診 ASCVD，或影像確認顯著斑塊負擔。符合任一項即成立。")
+    with st.container(border=True):
+        vh_hit = [short for label, short in VERY_HIGH if st.checkbox(label, key=f"v_{short}")]
+
+    st.subheader("4 高風險條件")
+    st.caption("四款其一即成立。")
     with st.container(border=True):
         h_hit = []
         if st.checkbox("糖尿病"):
             h_hit.append("糖尿病")
-        if st.checkbox("透析前 CKD：UACR ≥30 mg/g 或 eGFR <60，持續 ≥3 個月"):
+        if st.checkbox("慢性腎臟病進入透析治療前 "
+                       ":gray[UACR ≧30 mg/g 或 eGFR <60 mL/min/1.73m²，至少持續 3 個月]"):
             h_hit.append("透析前 CKD")
-        st.caption("已進入透析者不直接列入此項。")
-        if st.checkbox("CAC ≥400"):
-            h_hit.append("CAC ≥400")
-        if ldl is not None and ldl >= 190:
-            h_hit.append(f"LDL-C {ldl:.0f} ≥190")
-            st.markdown(f"<span class='ng'>LDL-C {ldl:.0f} ≥190，自動列入高風險</span>",
-                        unsafe_allow_html=True)
+        if ldl is not None:
+            ldl190 = ldl >= 190
+            st.checkbox("LDL-C ≧190 mg/dL :gray[填入 LDL-C 達 190 時自動成立]",
+                        value=ldl190, disabled=True)
+        else:
+            ldl190 = st.checkbox("LDL-C ≧190 mg/dL :gray[填入 LDL-C 達 190 時自動成立]")
+        if ldl190:
+            h_hit.append("LDL-C ≧190")
+        if st.checkbox("冠狀動脈鈣化分數（CAC）≧400"):
+            h_hit.append("CAC ≧400")
 
-    st.subheader("3. 心血管危險因子")
+    st.subheader("5 心血管風險因子計數")
+    st.caption("未符合上述高風險條件時，以此處的因子數量評估。2 項以上為中風險，1 項為低風險，"
+               "0 項為「0 項心血管風險因子」。")
     with st.container(border=True):
         rf = []
         if st.checkbox("高血壓"):
             rf.append("高血壓")
 
-        age_cut = 45 if sex == "男" else 55
+        age_label = "男性 ≧45 歲，女性 ≧55 歲 :gray[填入性別與年齡時自動判定]"
         if age is not None:
-            age_rf = age >= age_cut
-            st.checkbox(f"年齡（{sex} ≥{age_cut}）", value=age_rf, disabled=True,
-                        help="依上方年齡自動判定")
+            age_rf = age >= (45 if sex == "男" else 55)
+            st.checkbox(age_label, value=age_rf, disabled=True)
         else:
-            age_rf = st.checkbox(f"年齡（{sex} ≥{age_cut}）")
+            age_rf = st.checkbox(age_label)
         if age_rf:
             rf.append("年齡")
 
-        if st.checkbox("早發性冠心病家族史（男 ≤55、女 ≤65 歲發病）"):
-            rf.append("早發 CHD 家族史")
+        if st.checkbox("早發性冠心病家族史 :gray[男性 ≦55 歲、女性 ≦65 歲]"):
+            rf.append("早發性冠心病家族史")
 
-        hdl_cut = 40 if sex == "男" else 50
+        hdl_label = "HDL-C 偏低 :gray[男性 <40 mg/dL，女性 <50 mg/dL；填入性別與 HDL-C 時自動判定]"
         if hdl is not None:
-            low_hdl = hdl < hdl_cut
-            st.checkbox(f"HDL-C 偏低（{sex} <{hdl_cut}）", value=low_hdl, disabled=True,
-                        help="依上方 HDL-C 自動判定")
+            low_hdl = hdl < (40 if sex == "男" else 50)
+            st.checkbox(hdl_label, value=low_hdl, disabled=True, key="rf_hdl")
         else:
-            low_hdl = st.checkbox(f"HDL-C 偏低（{sex} <{hdl_cut}）")
+            low_hdl = st.checkbox(hdl_label, key="rf_hdl")
         if low_hdl:
             rf.append("HDL-C 偏低")
 
         if st.checkbox("抽菸"):
             rf.append("抽菸")
 
-        with st.expander("代謝性症候群（5 項中 ≥3 項）"):
-            waist = 90 if sex == "男" else 80
+        st.markdown("代謝性症候群 :gray[符合下列至少三項]")
+        sub_cols = st.columns([1, 20])
+        with sub_cols[1]:
             ms = [
-                st.checkbox(f"腰圍 {sex} ≥{waist} cm"),
-                st.checkbox("BP ≥130/85 或用藥"),
-                st.checkbox("空腹血糖 ≥100 或用藥"),
-                st.checkbox("TG ≥150 或用藥"),
-                low_hdl,
+                st.checkbox("腹部肥胖 :gray[男性 ≧90 cm，女性 ≧80 cm]"),
+                st.checkbox("血壓偏高 :gray[≧130/85 mmHg 或使用高血壓藥物]"),
+                st.checkbox("空腹血糖偏高 :gray[≧100 mg/dL 或使用糖尿病藥物]"),
+                st.checkbox("空腹 TG 偏高 :gray[≧150 mg/dL 或使用治療 TG 血脂藥物]"),
             ]
-            st.caption(f"HDL-C {sex} <{hdl_cut}：{'是' if low_hdl else '否'}（同上方 HDL 項）")
-            n_ms = sum(ms)
-            st.write(f"目前 {n_ms}/5 項")
+            st.checkbox("HDL-C 偏低 :gray[男性 <40 mg/dL，女性 <50 mg/dL；與上方 HDL-C 項連動]",
+                        value=low_hdl, disabled=True, key=f"ms_hdl_{low_hdl}")
+            n_ms = sum(ms) + int(low_hdl)
+            if n_ms >= 3:
+                st.markdown(f"<span class='ng'>{n_ms}/5 項，代謝性症候群成立</span>",
+                            unsafe_allow_html=True)
+            else:
+                st.caption(f"目前 {n_ms}/5 項")
         if n_ms >= 3:
             rf.append("代謝性症候群")
+
 
 # ---------- 判定 ----------
 if ext_hit:
@@ -201,7 +217,7 @@ elif len(rf) >= 2:
 elif len(rf) == 1:
     level, why = "低", rf
 else:
-    level, why = "0項", ["無心血管危險因子"]
+    level, why = "0項", ["未符合任何高風險條件或心血管風險因子"]
 
 L = LEVELS[level]
 
@@ -209,11 +225,11 @@ L = LEVELS[level]
 with right:
     why_txt = "、".join(why)
     if level in ("中", "低"):
-        why_txt = f"危險因子 {len(rf)} 項：{why_txt}"
+        why_txt = f"心血管風險因子 {len(rf)} 項：{why_txt}"
     nonhdl_target = f"&lt; {L['nonhdl']}" if L["nonhdl"] else "未列"
     st.markdown(f"""
 <div class="result" style="--c:{L['color']}">
-  <h2>{level}{'風險' if level != '0項' else '危險因子'}</h2>
+  <h2>{level + '風險' if level != '0項' else '0 項心血管風險因子'}</h2>
   <div class="why">{why_txt}</div>
   <div class="nums">
     <div><span>起始給付 LDL-C</span><b>≥ {L['start']}</b></div>
