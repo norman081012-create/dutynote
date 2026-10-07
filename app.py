@@ -4,7 +4,29 @@
 本工具為臨床速查摘要；實際申報以健保署最新公告及健保藥品代碼為準。
 執行：pip install streamlit && streamlit run ldl_app.py
 """
+import calendar
+from datetime import date, timedelta
+
 import streamlit as st
+
+WEEKDAY = "一二三四五六日"
+
+
+def add_months(d: date, n: int) -> date:
+    m = d.month - 1 + n
+    y, m = d.year + m // 12, m % 12 + 1
+    return date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def fmt(d: date) -> str:
+    return f"{d:%Y/%m/%d}（{WEEKDAY[d.weekday()]}）"
+
+
+def window(base: date, lo, hi, unit: str) -> str:
+    """unit: 'w' 週 / 'm' 月；回傳「起日 – 迄日」"""
+    f = (lambda n: base + timedelta(weeks=n)) if unit == "w" else (lambda n: add_months(base, n))
+    return f"{fmt(f(lo))} – {fmt(f(hi))}" if lo != hi else fmt(f(lo))
+
 
 st.set_page_config(page_title="降血脂給付速查", page_icon="🩺", layout="wide")
 
@@ -70,9 +92,10 @@ left, right = st.columns([3, 2], gap="large")
 # ---------- 輸入 ----------
 with left:
     st.subheader("病人資料")
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
     sex = c1.radio("性別", ["男", "女"], horizontal=True)
     age = c2.number_input("年齡", min_value=18, max_value=110, value=None, step=1, placeholder="歲")
+    visit = c3.date_input("本次就診日", value=date.today(), format="YYYY/MM/DD")
 
     c1, c2, c3 = st.columns(3)
     ldl = c1.number_input("LDL-C", min_value=0.0, value=None, step=1.0, placeholder="mg/dL")
@@ -214,12 +237,29 @@ with right:
                     st.caption(f"non-HDL-C {nonhdl:.0f}：LDL-C 達標後再評估次要目標。")
 
     with st.container(border=True):
-        st.markdown("**起始處理與首次追蹤**")
+        st.markdown("**起始處理**")
         st.write(L["tx"])
-        st.markdown("**追蹤**")
-        st.write(L["fu"])
-        st.write("更動藥物後 1–3 個月內複查血脂。")
-        st.write("仍未達標：檢視服藥；調至高強度或最大耐受 statin，必要時合併其他降脂藥。")
+
+        st.markdown(f"**追蹤日期**（以 {fmt(visit)} 起算）")
+        if L["drug_first"]:
+            rows = [
+                ("開始用藥後複查（6–8 週）", window(visit, 6, 8, "w")),
+                ("更動藥物後複查血脂（1–3 個月）", window(visit, 1, 3, "m")),
+                ("達標後定期追蹤（每 6 個月）", f"下次 {window(visit, 6, 6, 'm')}"),
+            ]
+        else:
+            rows = [
+                ("生活型態調整後複查（3–6 個月）", window(visit, 3, 6, "m")),
+                ("若開始 statin，用藥後複查（6–8 週）", window(visit, 6, 8, "w")),
+                ("更動藥物後複查血脂（1–3 個月）", window(visit, 1, 3, "m")),
+                ("達標後定期追蹤（每 6–12 個月）", f"下次 {window(visit, 6, 12, 'm')}"),
+            ]
+        for label, d in rows:
+            st.markdown(f"{label}  \n**{d}**")
+        st.caption("就診日即為開始用藥、更動藥物或確認達標的那一天時，直接看對應列。")
+
+        st.markdown("**仍未達標**")
+        st.write("檢視服藥；調至高強度或最大耐受 statin，必要時合併其他降脂藥。")
 
     with st.expander("完整分級表"):
         for name, v in LEVELS.items():
