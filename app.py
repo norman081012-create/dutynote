@@ -52,14 +52,20 @@ LEVELS = {
                fu="依中、低風險：達標後每 6–12 個月追蹤。"),
 }
 
-EXTREME = [
-    "冠心病＋1 年內 MI",
-    "冠心病＋≥2 次 MI",
-    "冠心病＋多支病變",
-    "冠心病＋ACS 合併 DM",
-    "冠心病＋PAD 或頸動脈狹窄",
-    "PAD 合併冠心病／頸動脈狹窄",
-]
+# 極高：兩款，皆須「主診斷」＋合併其一
+EXTREME = {
+    "（一）冠狀動脈疾病": [
+        "一年內曾經歷心肌梗塞",
+        "兩次（含）以上心肌梗塞病史",
+        "多支冠狀動脈阻塞",
+        "急性冠心症合併糖尿病",
+        "周邊動脈疾病或頸動脈狹窄",
+    ],
+    "（二）周邊動脈疾病": [
+        "冠狀動脈疾病",
+        "頸動脈狹窄",
+    ],
+}
 VERY_HIGH = [
     "ACS 病史",
     "曾血管再通術",
@@ -85,7 +91,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("降血脂藥物給付速查")
-st.caption("健保降血脂藥物給付規定（115 年 9 月 1 日生效）・表一 ASCVD 風險分級。例外代碼（第 2 頁）未納入。")
 
 left, right = st.columns([3, 2], gap="large")
 
@@ -107,8 +112,17 @@ with left:
 
     st.subheader("1. 臨床 ASCVD")
     with st.container(border=True):
-        st.markdown("**極高**：冠狀動脈疾病合併下列任一，或 PAD 合併冠心病／頸動脈狹窄")
-        ext_hit = [x for x in EXTREME if st.checkbox(x, key=f"e_{x}")]
+        st.markdown("**極高**：須先有主診斷，再合併下列任一項。只勾主診斷不構成極高風險。")
+        ext_hit = []
+        for main, subs in EXTREME.items():
+            if st.checkbox(f"{main}，再合併下列任一項", key=f"em_{main}"):
+                sub_cols = st.columns([1, 20])
+                with sub_cols[1]:
+                    hits = [x for x in subs if st.checkbox(x, key=f"es_{main}_{x}")]
+                if hits:
+                    ext_hit += [f"{main[3:]}＋{x}" for x in hits]
+                else:
+                    sub_cols[1].caption("尚未勾選合併條件，不列入極高風險。")
     with st.container(border=True):
         st.markdown("**非常高**：臨床 ASCVD")
         vh_hit = [x for x in VERY_HIGH if st.checkbox(x, key=f"v_{x}")]
