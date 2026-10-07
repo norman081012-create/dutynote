@@ -299,15 +299,6 @@ with right:
 
     # ---------- 衛教資訊 ----------
     st.subheader("衛教資訊")
-    lv_name = level + "風險" if level != "0項" else "0 項心血管風險因子"
-
-    with st.expander("為什麼同樣的 LDL-C，處理方式不一樣", expanded=True):
-        st.markdown(f"""
-健保先評估您將來發生心肌梗塞、中風或周邊動脈疾病的機會，分成六級，每一級各有開始用藥的數值和要降到的目標。
-報告上的參考範圍，無法回答「要不要吃藥」。
-
-您目前屬於 **{lv_name}**：LDL-C 達 **{L['start']} mg/dL** 以上可開始用藥，目標是降到 **{L['ldl']} mg/dL** 以下。
-""")
 
     with st.expander("治療怎麼開始"):
         if L["drug_first"]:
